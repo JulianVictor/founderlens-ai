@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr = SecretStr("")
     supabase_service_role_key: SecretStr = SecretStr("")
 
+    # Shared secret Supabase Auth signs its access tokens with (HS256). The API
+    # verifies tokens locally with it, so authenticating a request costs no
+    # network round trip. See app.core.security for why local verification.
+    supabase_jwt_secret: SecretStr = SecretStr("")
+    supabase_jwt_audience: str = "authenticated"
+    # Leeway, in seconds, allowed on exp/iat for clock skew between the machine
+    # that signed the token and this one.
+    supabase_jwt_leeway_seconds: int = Field(default=10, ge=0, le=300)
+
     # --- Neo4j ----------------------------------------------------------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"

@@ -9,10 +9,11 @@ result when the corpus does not support an answer.
 The point of the system is that every claim is checkable: retrieval traces,
 supporting chunks, graph paths and evaluation results are all inspectable.
 
-> **Status: Phase 0.** This repository currently contains the foundations —
-> project structure, typed configuration, quality gates, a `GET /health`
-> endpoint and a minimal frontend shell. The research pipeline itself is not
-> implemented yet.
+> **Status: Phase 1.** Foundations plus authentication and workspaces:
+> Supabase Auth with SSR sessions, `profiles` / `workspaces` /
+> `workspace_members` behind row-level security, a reusable FastAPI auth
+> dependency, and `GET /api/v1/me` and `GET /api/v1/workspaces`. Document
+> ingestion and the research pipeline are not implemented yet.
 
 ## Architecture
 
@@ -43,6 +44,7 @@ free-form LLM-authored Cypher.
 | [`docs/data-model.md`](docs/data-model.md) | Relational tables, Neo4j labels and relationships, workspace scoping and provenance rules. |
 | [`docs/ai-pipeline.md`](docs/ai-pipeline.md) | Each pipeline component and its responsibility; why the MVP is not agent-based. |
 | [`docs/adr/`](docs/adr/README.md) | Architecture decision records. |
+| [`supabase/README.md`](supabase/README.md) | Migrations and the local Supabase stack. |
 | [`docs/development.md`](docs/development.md) | Local setup and the quality gates. |
 
 ## Repository structure
@@ -88,6 +90,12 @@ curl http://localhost:8000/health
 # {"status":"ok","service":"founderlens-api"}
 ```
 
+Everything under `/api/v1` requires a Supabase access token:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/workspaces
+```
+
 Frontend — <http://localhost:3000>:
 
 ```bash
@@ -111,8 +119,8 @@ Full details in [`docs/development.md`](docs/development.md).
 ./scripts/check.sh
 ```
 
-which runs `ruff check`, `ruff format --check`, `mypy`, `pytest`, and the
-frontend `lint` and `typecheck`.
+which runs `ruff check`, `ruff format --check`, `mypy` and `pytest` for the
+backend, and `lint`, `typecheck` and the unit tests for the frontend.
 
 ## Configuration and secrets
 

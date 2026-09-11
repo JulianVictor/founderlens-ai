@@ -29,13 +29,30 @@ citation-validation gate treats it as one.
 mirror relational rows reuse the relational UUID; canonical entities that exist
 only in the graph get their UUID from the entity-resolution pipeline.
 
-**Soft delete at the top.** Deleting a workspace sets `deleted_at` and schedules
-purge of its Storage objects and its graph partition. Graph data is rebuildable,
-so purging it is not destructive of anything authoritative.
+**Soft delete at the top** *(planned, not in the MVP)*. Deleting a workspace
+will set `deleted_at` and schedule purge of its Storage objects and its graph
+partition. Graph data is rebuildable, so purging it is not destructive of
+anything authoritative. Phase 1 deletes a workspace outright, cascading to its
+memberships.
 
 ## Relational model (Supabase PostgreSQL)
 
 Identity comes from Supabase Auth; `user_id` always references `auth.users(id)`.
+
+### Profile
+
+Application-owned data about an authenticated user. `auth.users` belongs to
+Supabase Auth and is not extended directly, so anything the application knows
+about a person lives here. Created by the signup trigger, in the same
+transaction as the account.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` PK | References `auth.users(id)`, cascade on delete. |
+| `display_name` | `text` | Non-blank, 1-100 characters. |
+| `created_at` | `timestamptz` | |
+
+**Implemented** in `20260911000100_create_profiles.sql`.
 
 ### Workspace
 
@@ -43,12 +60,22 @@ The isolation boundary. Everything else hangs off it.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | `uuid` PK | |
-| `name` | `text` | |
-| `slug` | `text` | Unique; used in URLs. |
-| `owner_id` | `uuid` | `auth.users(id)`. The one member who cannot be removed. |
-| `created_at` / `updated_at` | `timestamptz` | |
-| `deleted_at` | `timestamptz` NULL | Soft delete. |
+| `id` | `uuid` PK | `gen_random_uuid()`. |
+| `name` | `text` | Non-blank, 1-100 characters. |
+| `created_by` | `uuid` | `auth.users(id)`. Historical record, *not* an authorization input. |
+| `created_at` | `timestamptz` | |
+
+`created_by` is deliberately not consulted when deciding access. Membership in
+`workspace_members` is the only authority, so transferring ownership never
+requires rewriting history. A `slug`, `updated_at` and soft deletion are
+expected later; they are not in the MVP because nothing yet needs them.
+
+There is **no INSERT policy** on this table. A directly-inserted workspace would
+have no members and so be invisible to its own creator. Creation goes through
+`public.create_workspace(name)`, which inserts the workspace and its owner
+membership in one transaction, or through the signup trigger.
+
+**Implemented** in `20260911000200_create_workspaces.sql`.
 
 ### WorkspaceMember
 
@@ -57,14 +84,44 @@ for access; no other check may substitute for it.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `workspace_id` | `uuid` PK part | |
-| `user_id` | `uuid` PK part | `auth.users(id)`. |
-| `role` | `text` | `owner` \| `admin` \| `member` \| `viewer`. |
-| `invited_by` | `uuid` NULL | |
+| `workspace_id` | `uuid` PK part | Cascade on workspace delete. |
+| `user_id` | `uuid` PK part | `auth.users(id)`, cascade on delete. |
+| `role` | `public.workspace_role` | `owner` \| `member`. |
 | `created_at` | `timestamptz` | |
 
-Primary key `(workspace_id, user_id)`. `viewer` may ask questions and read
-answers but may not upload or delete documents.
+Primary key `(workspace_id, user_id)`, with a secondary index on `user_id` for
+the "which workspaces does this user belong to" direction.
+
+The MVP has two roles. `admin` and `viewer` are plausible later additions, but
+each new role has to be placed in the privilege ordering deliberately -- see
+`WorkspaceRole.rank` in `app/models/workspace.py`, which keeps the ordering as
+an explicit table rather than an accident of declaration order.
+
+A trigger prevents removing or demoting the last `owner`: an ownerless
+workspace can never have its membership changed again.
+
+**Implemented** in `20260911000300_create_workspace_members.sql`, with policies
+in `20260911000400_workspace_access_policies.sql`.
+
+### Row-level security and the two access paths
+
+The browser talks to Supabase directly with the user's own token, and RLS is
+what isolates it. The FastAPI backend connects as a privileged role that RLS
+does not constrain, so on that path isolation is enforced by the repository and
+service layers: every query is scoped by `user_id`, and workspace access goes
+through `WorkspaceService.require_membership`. Both mechanisms are load-bearing
+and neither is a fallback for the other.
+
+Policies consult two `SECURITY DEFINER` helpers, `is_workspace_member()` and
+`is_workspace_owner()`. They must be `SECURITY DEFINER`: the natural policy on
+`workspace_members` has to query `workspace_members` to decide, which
+re-triggers the same policy and is rejected as infinite recursion. Both are
+`STABLE`, read-only, pinned to an explicit `search_path`, and test `auth.uid()`
+rather than accepting a user id, so a caller cannot ask about somebody else.
+
+Every protected table also has `FORCE ROW LEVEL SECURITY`, which applies the
+policies to the table owner too. Without it the owning role bypasses every
+policy.
 
 ### Document
 

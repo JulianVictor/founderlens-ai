@@ -18,5 +18,7 @@ echo "==> frontend lint"
 npm --prefix frontend run lint
 echo "==> frontend typecheck"
 npm --prefix frontend run typecheck
+echo "==> frontend tests"
+npm --prefix frontend run test
 
 echo "All checks passed."

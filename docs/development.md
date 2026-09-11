@@ -27,6 +27,11 @@ ruff format --check backend
 (cd backend && mypy)
 ```
 
+`SUPABASE_JWT_SECRET` must match the Supabase project, or the API rejects every
+token. For the local stack, `supabase status` prints it; on a hosted project it
+is under Settings > API > JWT Secret. The API verifies tokens locally with it
+rather than calling Supabase on each request.
+
 ## Frontend
 
 ```bash
@@ -34,8 +39,12 @@ cd frontend
 npm install
 cp .env.example .env.local
 npm run dev
-npm run lint && npm run typecheck && npm run build
+npm run lint && npm run typecheck && npm run test && npm run build
 ```
+
+`NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are required for
+sign-in to work. Only `NEXT_PUBLIC_*` values reach the browser; the anon key is
+safe there because row-level security is what protects the data.
 
 ## Infrastructure
 
