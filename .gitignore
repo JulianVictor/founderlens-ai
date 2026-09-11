@@ -1,4 +1,71 @@
-# Ignore files
-CLAUDE.md
+# --- Secrets and environment ------------------------------------------------
 .env
-.venv
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# --- Local agent instructions ----------------------------------------------
+CLAUDE.md
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# --- Node / Next.js ---------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.vercel/
+
+# --- Supabase ---------------------------------------------------------------
+supabase/.branches/
+supabase/.temp/
+
+# --- IDE / editors ----------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Local scratch ----------------------------------------------------------
+tmp/
+*.local

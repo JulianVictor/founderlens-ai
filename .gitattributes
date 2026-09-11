@@ -1,0 +1,21 @@
+# Normalise text files in the repository to LF.
+* text=auto eol=lf
+
+# Shell scripts must keep LF even on Windows checkouts: a CRLF shebang line
+# makes bash fail with `$'\r': command not found`.
+*.sh text eol=lf
+
+# Batch files are the opposite case.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# Lockfiles are generated; keep them out of diff review noise.
+package-lock.json linguist-generated=true -diff

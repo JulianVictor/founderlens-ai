@@ -1,0 +1,32 @@
+# Local development infrastructure.
+#
+# Only stateful services that are awkward to install by hand live here. The API
+# and the frontend run on the host so that reloads stay fast.
+#
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#
+# Neo4j Browser: http://localhost:7474   Bolt: bolt://localhost:7687
+
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: founderlens-neo4j
+    ports:
+      - "7474:7474" # HTTP / Neo4j Browser
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in infra/docker/.env}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
