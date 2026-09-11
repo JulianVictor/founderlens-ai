@@ -33,7 +33,17 @@ handlers stay thin; decisions live in services and the pipeline.
 Invariants that hold across every phase: workspace-scoped isolation on every
 query, provenance on every chunk and graph element, no claim without retrieved
 evidence, entity identity assigned by us rather than by the LLM, and no
-free-form LLM-authored Cypher. See [`docs/architecture.md`](docs/architecture.md).
+free-form LLM-authored Cypher.
+
+### Documentation
+
+| Document | Covers |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | Technology choices, why application state is separated from graph retrieval data, both pipelines, system invariants. |
+| [`docs/data-model.md`](docs/data-model.md) | Relational tables, Neo4j labels and relationships, workspace scoping and provenance rules. |
+| [`docs/ai-pipeline.md`](docs/ai-pipeline.md) | Each pipeline component and its responsibility; why the MVP is not agent-based. |
+| [`docs/adr/`](docs/adr/README.md) | Architecture decision records. |
+| [`docs/development.md`](docs/development.md) | Local setup and the quality gates. |
 
 ## Repository structure
 
@@ -52,7 +62,7 @@ backend/    FastAPI service
 supabase/   database migrations and local stack notes
 infra/      Docker Compose for local Neo4j
 evals/      retrieval and grounding evaluation datasets
-docs/       architecture and development documentation
+docs/       architecture, data model, pipeline and decision records
 scripts/    dev and check helpers
 ```
 
