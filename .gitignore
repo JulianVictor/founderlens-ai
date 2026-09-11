@@ -1,0 +1,4 @@
+# Ignore files
+CLAUDE.md
+.env
+.venv
