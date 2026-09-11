@@ -9,11 +9,13 @@ result when the corpus does not support an answer.
 The point of the system is that every claim is checkable: retrieval traces,
 supporting chunks, graph paths and evaluation results are all inspectable.
 
-> **Status: Phase 1.** Foundations plus authentication and workspaces:
+> **Status: Phase 1.** Authentication, workspaces and document management:
 > Supabase Auth with SSR sessions, `profiles` / `workspaces` /
-> `workspace_members` behind row-level security, a reusable FastAPI auth
-> dependency, and `GET /api/v1/me` and `GET /api/v1/workspaces`. Document
-> ingestion and the research pipeline are not implemented yet.
+> `workspace_members` / `documents` behind row-level security, a reusable
+> FastAPI auth dependency, and upload, listing and deletion of PDF, plain-text
+> and Markdown documents with server-side content-type detection. **Ingestion
+> and the research pipeline are not implemented yet** -- uploaded documents are
+> stored, not yet chunked, embedded or added to the graph.
 
 ## Architecture
 
@@ -94,6 +96,10 @@ Everything under `/api/v1` requires a Supabase access token:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/workspaces
+```
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -F file=@memo.pdf http://localhost:8000/api/v1/workspaces/$WORKSPACE_ID/documents
 ```
 
 Frontend — <http://localhost:3000>:

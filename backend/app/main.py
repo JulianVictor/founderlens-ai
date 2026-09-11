@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,13 +26,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Open the database pool for the life of the process.
 
         Connecting at startup means a bad DATABASE_URL fails the deployment
-        rather than the first request that needs a workspace.
+        rather than the first request that needs a workspace. The outbound HTTP
+        client is opened here too, so that Storage calls reuse connections
+        instead of paying a TLS handshake each time.
         """
         database: Database = app.state.database
         await database.connect()
+        app.state.http_client = httpx.AsyncClient(timeout=resolved.storage_timeout_seconds)
         try:
             yield
         finally:
+            client: httpx.AsyncClient = app.state.http_client
+            await client.aclose()
             await database.disconnect()
 
     app = FastAPI(

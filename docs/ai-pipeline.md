@@ -67,6 +67,23 @@ extraction lives in `ai/extraction/`. The two "extraction" names refer to
 different operations; see the note in
 [`architecture.md`](architecture.md#ingestion-pipeline).
 
+### Before ingestion: accepting a document
+
+Upload is not a pipeline stage, but it is what guarantees the pipeline's input.
+A document is accepted only after the server has decided what it *is* by
+reading it -- `app/core/content_detection.py`. The filename extension and the
+multipart `Content-Type` are both client-controlled strings and neither is
+believed.
+
+This matters to the pipeline specifically: text extraction dispatches on the
+recorded `mime_type`, so a file recorded as `application/pdf` because it was
+*called* `report.pdf` would hand arbitrary bytes to a PDF parser. PDF has a
+magic number and is checked for it; plain text and Markdown do not differ in
+their bytes, so the real check is "does this decode as UTF-8 without NULs", and
+the extension only chooses between the two text labels once that has passed.
+
+MVP accepts PDF, plain text and Markdown, up to 25 MiB.
+
 ### `ingestion/` — text extraction
 
 **Responsibility.** Turn uploaded bytes into text, preserving enough structure

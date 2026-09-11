@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # that signed the token and this one.
     supabase_jwt_leeway_seconds: int = Field(default=10, ge=0, le=300)
 
+    # --- Document storage -----------------------------------------------
+    documents_bucket: str = "research-documents"
+    # 25 MiB. Also set on the bucket itself, so a mistake here cannot turn into
+    # an unbounded write. Raising this means raising both.
+    max_document_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
+    storage_timeout_seconds: float = Field(default=30.0, gt=0)
+
     # --- Neo4j ----------------------------------------------------------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"

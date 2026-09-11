@@ -7,7 +7,7 @@
  */
 
 /** Prefixes that require an authenticated user. */
-const PROTECTED_PREFIXES = ["/dashboard"] as const;
+const PROTECTED_PREFIXES = ["/dashboard", "/workspaces"] as const;
 
 /** Routes that only make sense when signed out. */
 const AUTH_ROUTES = ["/login", "/signup"] as const;

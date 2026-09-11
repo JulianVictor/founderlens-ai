@@ -131,20 +131,56 @@ points at them and is authoritative for everything about them.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `uuid` PK | Reused as the `:Document` node id in Neo4j. |
-| `workspace_id` | `uuid` | |
-| `title` | `text` | |
-| `source_type` | `text` | `upload` \| `url` \| `paste`. |
-| `source_uri` | `text` NULL | Original URL, when there was one. |
-| `storage_path` | `text` | Supabase Storage object key. |
-| `content_type` | `text` | |
-| `byte_size` | `bigint` | |
-| `checksum_sha256` | `text` | Provenance anchor and dedup key. |
-| `status` | `text` | `pending` \| `ingesting` \| `ready` \| `failed`. |
-| `uploaded_by` | `uuid` | |
-| `created_at` | `timestamptz` | |
+| `workspace_id` | `uuid` | Cascade on workspace delete. |
+| `uploaded_by` | `uuid` | `auth.users(id)`. Historical record, not an authorization input. |
+| `filename` | `text` | The name the user's file had. **Display only.** |
+| `storage_path` | `text` | Object key. Unique globally. |
+| `mime_type` | `text` | The type the server **detected from the bytes**. |
+| `size_bytes` | `bigint` | Positive. |
+| `checksum_sha256` | `text` | Dedup key and provenance anchor; `^[0-9a-f]{64}$`. |
+| `status` | `public.document_status` | `uploaded` \| `processing` \| `ready` \| `failed`. |
+| `error_message` | `text` NULL | Only when `failed`, enforced by a check constraint. |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` maintained by trigger, never client-supplied. |
 
 Unique on `(workspace_id, checksum_sha256)`: re-uploading the same bytes into a
-workspace resolves to the existing document instead of duplicating the corpus.
+workspace resolves to the existing document instead of duplicating the corpus,
+which would let one source count twice in retrieval. Dedup is deliberately *per
+workspace* -- two teams researching the same company must both be able to hold
+the same filing.
+
+**`filename` is never used to build a path and never trusted to say what the
+file contains.** It is sanitised to a single path segment of printable
+characters before being stored, because it is rendered in a UI and written to
+logs. `mime_type` comes from inspecting the bytes -- see
+[`ai-pipeline.md`](ai-pipeline.md) for why an extension is not evidence.
+
+The id is minted by the application rather than by the column default. It has
+to be: the storage key is derived from it, and the bytes are written before the
+row exists, so it must be known in advance. It is still a server-generated
+UUIDv4 -- the identity rule that matters is that no LLM proposes it.
+
+**Implemented** in `20260911000600_create_documents.sql`.
+
+### Document storage
+
+Object keys are `<workspace_id>/<document_id>.<ext>`, where the extension comes
+from the *detected* type. Every segment is a UUID or a server-chosen constant,
+so path traversal and cross-workspace key collisions are impossible by
+construction rather than by validation.
+
+The `research-documents` bucket is private and **no policy grants
+`authenticated` any access to it**. A browser holding a user's session cannot
+read, write or list an object there. This is deliberate: every upload has to be
+inspected server-side before it is accepted, and a direct-to-storage upload
+would bypass that. All access is mediated by the API using the service-role key,
+after a membership check.
+
+Postgres cannot reach into Storage, so deleting a document row does not delete
+its object. Removal is ordered by the API -- derived data, then the object, then
+the row -- so that a failure leaves a retryable document rather than orphaned
+bytes. See `DocumentService.delete`.
+
+**Implemented** in `20260911000700_create_documents_bucket.sql`.
 
 ### IngestionJob
 

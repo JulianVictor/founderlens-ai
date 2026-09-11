@@ -15,18 +15,49 @@ from httpx import AsyncClient
 
 from tests.conftest import JWT_SECRET, OWNER_ID, TokenFactory
 
-# Every route that must refuse an anonymous caller. New protected routes belong
-# in this list; the parametrised tests below then cover them automatically.
-PROTECTED_ROUTES = [
-    "/api/v1/me",
-    "/api/v1/workspaces",
-    "/probe/workspaces/00000000-0000-4000-8000-0000000000a1",
+WORKSPACE = "00000000-0000-4000-8000-0000000000a1"
+DOCUMENT = "00000000-0000-4000-8000-0000000000d1"
+
+# Every route that must refuse an anonymous caller, as
+# (method, OpenAPI template, a concrete URL to probe).
+#
+# The template is what the coverage test below compares against the generated
+# schema, so a new endpoint that is not listed here fails the suite rather than
+# shipping without an authentication test.
+PROTECTED_ROUTES: list[tuple[str, str, str]] = [
+    ("GET", "/api/v1/me", "/api/v1/me"),
+    ("GET", "/api/v1/workspaces", "/api/v1/workspaces"),
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/documents",
+        f"/api/v1/workspaces/{WORKSPACE}/documents",
+    ),
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/documents",
+        f"/api/v1/workspaces/{WORKSPACE}/documents",
+    ),
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+        f"/api/v1/workspaces/{WORKSPACE}/documents/{DOCUMENT}",
+    ),
+    (
+        "DELETE",
+        "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+        f"/api/v1/workspaces/{WORKSPACE}/documents/{DOCUMENT}",
+    ),
+    ("GET", "/probe/workspaces/{workspace_id}", f"/probe/workspaces/{WORKSPACE}"),
 ]
 
+ROUTE_IDS = [f"{method} {template}" for method, template, _ in PROTECTED_ROUTES]
 
-@pytest.mark.parametrize("path", PROTECTED_ROUTES)
-async def test_no_credentials_is_401(client: AsyncClient, path: str) -> None:
-    response = await client.get(path)
+
+@pytest.mark.parametrize(
+    ("method", "path"), [(m, u) for m, _, u in PROTECTED_ROUTES], ids=ROUTE_IDS
+)
+async def test_no_credentials_is_401(client: AsyncClient, method: str, path: str) -> None:
+    response = await client.request(method, path)
 
     assert response.status_code == 401
     # 401 rather than 403: the caller has not failed an authorization check,
@@ -34,9 +65,27 @@ async def test_no_credentials_is_401(client: AsyncClient, path: str) -> None:
     assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
-@pytest.mark.parametrize("path", PROTECTED_ROUTES)
-async def test_garbage_token_is_401(client: AsyncClient, path: str) -> None:
-    response = await client.get(path, headers={"Authorization": "Bearer not-a-jwt"})
+@pytest.mark.parametrize(
+    ("method", "path"), [(m, u) for m, _, u in PROTECTED_ROUTES], ids=ROUTE_IDS
+)
+async def test_garbage_token_is_401(client: AsyncClient, method: str, path: str) -> None:
+    response = await client.request(method, path, headers={"Authorization": "Bearer not-a-jwt"})
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path"), [(m, u) for m, _, u in PROTECTED_ROUTES], ids=ROUTE_IDS
+)
+async def test_authentication_is_checked_before_the_request_body(
+    client: AsyncClient, method: str, path: str
+) -> None:
+    """An anonymous request is refused on its credentials, not its payload.
+
+    A 422 here would mean the route validated input before deciding whether the
+    caller was allowed to be there at all.
+    """
+    response = await client.request(method, path, content=b"not valid anything")
 
     assert response.status_code == 401
 
@@ -182,7 +231,17 @@ def test_protected_routes_list_covers_every_v1_route(app: Any) -> None:
     """
     # app.routes does not flatten included routers in this FastAPI version,
     # so the generated schema is the reliable list of what is actually exposed.
-    v1_paths = {path for path in app.openapi()["paths"] if path.startswith("/api/v1")}
-    covered = {path for path in PROTECTED_ROUTES if path.startswith("/api/v1")}
+    schema = app.openapi()["paths"]
+    exposed = {
+        (method.upper(), path)
+        for path, operations in schema.items()
+        if path.startswith("/api/v1")
+        for method in operations
+    }
+    covered = {
+        (method, template)
+        for method, template, _ in PROTECTED_ROUTES
+        if template.startswith("/api/v1")
+    }
 
-    assert v1_paths == covered
+    assert exposed == covered

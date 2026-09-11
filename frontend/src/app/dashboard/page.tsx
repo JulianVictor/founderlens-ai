@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
@@ -62,14 +63,16 @@ export default async function DashboardPage() {
               ? membership.workspaces[0]
               : membership.workspaces;
             return (
-              <li
-                key={workspace?.id ?? index}
-                className="flex items-center justify-between gap-4 bg-[var(--background)] px-5 py-4"
-              >
-                <span className="font-medium">{workspace?.name}</span>
-                <span className="font-mono text-xs uppercase tracking-wider text-black/40 dark:text-white/40">
-                  {membership.role}
-                </span>
+              <li key={workspace?.id ?? index} className="bg-[var(--background)]">
+                <Link
+                  href={`/workspaces/${workspace?.id}/documents`}
+                  className="flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                >
+                  <span className="font-medium">{workspace?.name}</span>
+                  <span className="font-mono text-xs uppercase tracking-wider text-black/40 dark:text-white/40">
+                    {membership.role}
+                  </span>
+                </Link>
               </li>
             );
           })}

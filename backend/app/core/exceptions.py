@@ -71,3 +71,69 @@ class ProfileNotFoundError(FounderLensError):
     def __init__(self, user_id: UUID) -> None:
         super().__init__(f"No profile for user {user_id}")
         self.user_id = user_id
+
+
+class DocumentNotFoundError(FounderLensError):
+    """No such document in this workspace.
+
+    As with workspaces, "does not exist" and "exists in a workspace you are not
+    a member of" are the same error. The repository is scoped by workspace, so
+    the two cases are not even distinguishable by the time this is raised.
+    """
+
+    def __init__(self, document_id: UUID) -> None:
+        super().__init__(f"Document {document_id} not found")
+        self.document_id = document_id
+
+
+class UnsupportedDocumentTypeError(FounderLensError):
+    """The uploaded bytes are not a type FounderLens accepts.
+
+    Raised on what the file *is*, never on what it was called.
+    """
+
+    def __init__(self, filename: str, accepted: tuple[str, ...]) -> None:
+        super().__init__(f"{filename!r} is not an accepted document type")
+        self.filename = filename
+        self.accepted = accepted
+
+
+class DocumentTooLargeError(FounderLensError):
+    """The upload exceeds the configured size limit."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        super().__init__(f"Document exceeds the {limit_bytes} byte limit")
+        self.limit_bytes = limit_bytes
+
+
+class EmptyDocumentError(FounderLensError):
+    """The upload contained no bytes.
+
+    Distinguished from an unsupported type because the fix is different: an
+    empty file is usually a failed read on the client, not a wrong format.
+    """
+
+
+class DuplicateDocumentError(FounderLensError):
+    """These exact bytes are already in this workspace.
+
+    Not an error in the sense of something going wrong -- it is how re-uploading
+    resolves to the document that already exists, rather than counting one
+    source twice and skewing retrieval.
+    """
+
+    def __init__(self, existing_document_id: UUID) -> None:
+        super().__init__(f"Document already exists as {existing_document_id}")
+        self.existing_document_id = existing_document_id
+
+
+class DocumentStorageError(FounderLensError):
+    """Supabase Storage could not be reached, or refused the operation.
+
+    A dependency failure rather than a caller mistake, so it must not be
+    reported as a 4xx: the client did nothing wrong and retrying may work.
+    """
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(f"Document storage {operation} failed")
+        self.operation = operation

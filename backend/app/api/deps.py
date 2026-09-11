@@ -18,6 +18,7 @@ from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 from fastapi import Depends, Path, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -26,6 +27,14 @@ from app.core.db import Database
 from app.core.exceptions import AuthenticationError
 from app.core.security import AuthenticatedUser, SupabaseJWTVerifier
 from app.models.workspace import WorkspaceMembership, WorkspaceRole
+from app.repositories.document_repository import (
+    DocumentRepository,
+    PostgresDocumentRepository,
+)
+from app.repositories.document_storage import (
+    DocumentStorage,
+    SupabaseDocumentStorage,
+)
 from app.repositories.profile_repository import (
     PostgresProfileRepository,
     ProfileRepository,
@@ -34,6 +43,7 @@ from app.repositories.workspace_repository import (
     PostgresWorkspaceRepository,
     WorkspaceRepository,
 )
+from app.services.document_service import DocumentService
 from app.services.profile_service import ProfileService
 from app.services.workspace_service import WorkspaceService
 
@@ -118,6 +128,39 @@ def get_profile_service(
 
 WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
 ProfileServiceDep = Annotated[ProfileService, Depends(get_profile_service)]
+
+
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    """The shared outbound HTTP client owned by the application.
+
+    One pooled client for the process rather than one per request: building a
+    client per call throws away connection reuse and TLS session resumption,
+    which is most of the cost of talking to Storage.
+    """
+    client: httpx.AsyncClient = request.app.state.http_client
+    return client
+
+
+HttpClientDep = Annotated[httpx.AsyncClient, Depends(get_http_client)]
+
+
+def get_document_repository(database: DatabaseDep) -> DocumentRepository:
+    return PostgresDocumentRepository(database.pool)
+
+
+def get_document_storage(settings: SettingsDep, client: HttpClientDep) -> DocumentStorage:
+    return SupabaseDocumentStorage(settings, client)
+
+
+def get_document_service(
+    repository: Annotated[DocumentRepository, Depends(get_document_repository)],
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)],
+    settings: SettingsDep,
+) -> DocumentService:
+    return DocumentService(repository, storage, max_document_bytes=settings.max_document_bytes)
+
+
+DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
 
 
 async def get_workspace_membership(
