@@ -20,7 +20,14 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
 MIGRATIONS = sorted(MIGRATIONS_DIR.glob("*.sql"))
 
 #: Tables that hold workspace-scoped or user-scoped data and must be protected.
-PROTECTED_TABLES = ["profiles", "workspaces", "workspace_members"]
+PROTECTED_TABLES = [
+    "profiles",
+    "workspaces",
+    "workspace_members",
+    "documents",
+    "ingestion_jobs",
+    "document_chunks",
+]
 
 
 def test_migrations_exist() -> None:
@@ -116,3 +123,84 @@ def test_signup_creates_profile_workspace_and_owner_membership(all_sql: str) -> 
     assert "insert into public.workspaces" in trigger_body
     assert "insert into public.workspace_members" in trigger_body
     assert "'owner'" in trigger_body
+
+
+def enum_values(all_sql: str, type_name: str) -> set[str]:
+    """Values declared for a Postgres enum.
+
+    Parsed by splitting rather than by regex so the comments inside the
+    declarations do not have to be matched around.
+    """
+    marker = f"create type public.{type_name} as enum ("
+    start = all_sql.index(marker) + len(marker)
+    body = all_sql[start : all_sql.index(")", start)]
+
+    values: set[str] = set()
+    for line in body.splitlines():
+        for part in line.split("--")[0].split(","):
+            cleaned = part.strip().strip("'")
+            if cleaned:
+                values.add(cleaned)
+    return values
+
+
+def test_only_one_ingestion_job_may_be_active_per_document(all_sql: str) -> None:
+    """The real idempotency guard.
+
+    Two concurrent process requests can both read "no active job" before
+    either writes one, so only a unique index can settle that. Application
+    code cannot.
+    """
+    assert "unique index ingestion_jobs_one_active_per_document" in all_sql
+    assert "where status in ('queued', 'running')" in all_sql
+
+
+def test_chunks_are_unique_per_position(all_sql: str) -> None:
+    """With deterministic ids, this is what makes reprocessing replace a
+    document's chunks rather than accumulate them."""
+    assert "unique (document_id, chunk_index)" in all_sql
+
+
+def test_ingestion_stage_enum_matches_the_application(all_sql: str) -> None:
+    from app.models.ingestion import IngestionStage
+
+    assert enum_values(all_sql, "ingestion_stage") == {stage.value for stage in IngestionStage}
+
+
+def test_job_status_enum_matches_the_application(all_sql: str) -> None:
+    from app.models.ingestion import IngestionJobStatus
+
+    assert enum_values(all_sql, "ingestion_job_status") == {
+        status.value for status in IngestionJobStatus
+    }
+
+
+def test_document_status_enum_matches_the_application(all_sql: str) -> None:
+    from app.models.document import DocumentStatus
+
+    assert enum_values(all_sql, "document_status") == {status.value for status in DocumentStatus}
+
+
+def test_embed_and_graph_are_not_yet_stages(all_sql: str) -> None:
+    """A stage the pipeline cannot reach would make current_stage a claim
+    rather than a fact."""
+    stages = enum_values(all_sql, "ingestion_stage")
+
+    assert "embed" not in stages
+    assert "graph" not in stages
+
+
+def test_a_job_is_completed_exactly_when_it_is_terminal(all_sql: str) -> None:
+    """Otherwise "is it finished" has two answers that can disagree."""
+    assert "ingestion_jobs_completed_iff_terminal" in all_sql
+
+
+def test_chunks_survive_losing_their_job_record(all_sql: str) -> None:
+    """Pruning the audit trail must not delete the evidence."""
+    assert "references public.ingestion_jobs (id) on delete set null" in all_sql
+
+
+def test_derived_tables_cascade_from_their_document(all_sql: str) -> None:
+    """Deleting a document must not leave chunks or jobs behind describing
+    text that no longer exists."""
+    assert all_sql.count("references public.documents (id) on delete cascade") >= 2

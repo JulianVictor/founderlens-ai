@@ -184,26 +184,71 @@ bytes. See `DocumentService.delete`.
 
 ### IngestionJob
 
-One run of the ingestion pipeline over one document. Exists so that a failure is
-diagnosable and resumable rather than an opaque status flag.
+One run of the pipeline over one document. Exists so that a failure is
+diagnosable and retryable rather than an opaque status flag.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `uuid` PK | |
-| `workspace_id` | `uuid` | |
-| `document_id` | `uuid` | |
-| `status` | `text` | `queued` \| `running` \| `succeeded` \| `failed` \| `cancelled`. |
-| `stage` | `text` | Furthest stage reached: `extraction` … `graph_persistence`. |
-| `attempt` | `int` | |
-| `error_code` / `error_message` | `text` NULL | Populated on failure. |
-| `pipeline_version` | `text` | Which pipeline produced this data. |
-| `embedding_model` | `text` | Which vectors this job wrote. |
-| `metrics` | `jsonb` | Chunk, token, entity and relationship counts; timings. |
-| `started_at` / `finished_at` | `timestamptz` NULL | |
+| `workspace_id` | `uuid` | Cascade on workspace delete. |
+| `document_id` | `uuid` | Cascade on document delete. |
+| `status` | `public.ingestion_job_status` | `queued` \| `running` \| `succeeded` \| `failed` \| `cancelled`. |
+| `current_stage` | `public.ingestion_stage` | Furthest stage reached: `upload` \| `extract` \| `clean` \| `chunk` \| `persist`. |
+| `attempt` | `int` | Which attempt this is for the document. |
+| `error_message` | `text` NULL | Only when failed, enforced by a check constraint. |
+| `chunk_count` | `int` NULL | Set on success. |
+| `pipeline_version` | `text` | Which code produced the result. |
+| `started_at` / `completed_at` | `timestamptz` NULL | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` maintained by trigger. |
 
-`pipeline_version` and `embedding_model` are what make derived data auditable:
-they answer "which code and which model produced the graph I am querying", and
-therefore "what needs re-running after this change".
+The stage is recorded *before* each step runs, so a job killed mid-flight
+leaves behind the stage it was in rather than the last one it finished.
+`embed` and `graph` are deliberately absent from the enum: a stage the pipeline
+cannot reach would make `current_stage` a claim rather than a fact.
+
+A **retry is a new row**, never a mutated one, so the history of what was tried
+survives. `completed_at` is set exactly when the status becomes terminal, so
+"is it finished" has one answer rather than two that can disagree.
+
+**The idempotency guard** is a partial unique index: at most one job per
+document may be `queued` or `running`. It lives in the database because two
+concurrent process requests can both read "no active job" before either writes
+one — only the database can settle that race. A second request therefore joins
+the run already under way instead of starting a rival one.
+
+**Implemented** in `20260911000800_create_ingestion_jobs.sql`.
+
+### DocumentChunk
+
+The output of deterministic ingestion, held relationally until the graph phase
+indexes it into Neo4j. Postgres is the staging ground, not the destination:
+keeping chunks here means embedding and graph construction can be re-run from
+stored chunks instead of re-parsing every document.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` PK | The deterministic chunk id, supplied by the pipeline rather than defaulted. |
+| `workspace_id` / `document_id` | `uuid` | Both cascade on delete. |
+| `chunk_index` | `int` | Position in the document, 0-based. |
+| `text` | `text` | Non-blank. |
+| `token_count` | `int` | |
+| `page_number` | `int` NULL | Page the chunk starts on. |
+| `page_numbers` | `int[]` | Every page it covers. |
+| `start_offset` / `end_offset` | `int` | Span in the cleaned text; slicing by these reproduces `text`. |
+| `source_start_offset` / `source_end_offset` | `int` | Span in the parser's output — the provenance anchor. |
+| `content_hash` | `text` | SHA-256 of `text`. |
+| `tokenizer` | `text` | Counts from different tokenizers are not comparable. |
+| `ingestion_job_id` | `uuid` NULL | The run that last wrote the row; nulled rather than cascading, so pruning the audit trail does not delete evidence. |
+| `created_at` | `timestamptz` | |
+
+Unique on `(document_id, chunk_index)`. Together with the deterministic id,
+that is what makes reprocessing a **replace** rather than an append: the
+pipeline deletes the chunks the new run did not produce and upserts the rest,
+in one transaction. Re-running over unchanged bytes recomputes the same ids and
+updates the same rows, so `created_at` still says when each chunk first
+appeared — visible evidence that nothing was recreated.
+
+**Implemented** in `20260911000900_create_document_chunks.sql`.
 
 ### ResearchQuery
 

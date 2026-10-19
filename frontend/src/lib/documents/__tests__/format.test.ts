@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canProcess,
   formatBytes,
   formatUploadedAt,
+  hasWorkInFlight,
   statusLabel,
   uploadErrorMessage,
 } from "@/lib/documents/format";
@@ -111,5 +113,57 @@ describe("uploadErrorMessage", () => {
     for (const status of [400, 401, 404, 409, 413, 415, 418, 500, 502, 503]) {
       expect(uploadErrorMessage(status).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("canProcess", () => {
+  it("offers processing for a freshly uploaded document", () => {
+    expect(canProcess("uploaded")).toBe(true);
+  });
+
+  it("offers a retry after a failure", () => {
+    // Failures are often transient, and the backend treats a retry as a
+    // fresh attempt rather than refusing one.
+    expect(canProcess("failed")).toBe(true);
+  });
+
+  it("does not offer it while a run is in flight", () => {
+    expect(canProcess("processing")).toBe(false);
+  });
+
+  it("does not offer it for a document that is already done", () => {
+    expect(canProcess("ready")).toBe(false);
+  });
+
+  it("does not offer it for a status it does not recognise", () => {
+    // Fails closed: a status shipped by the API before the UI knows about it
+    // must not get an action whose effect nobody has thought about.
+    expect(canProcess("quarantined")).toBe(false);
+  });
+});
+
+describe("hasWorkInFlight", () => {
+  it("is false for an empty list", () => {
+    expect(hasWorkInFlight([])).toBe(false);
+  });
+
+  it("is false when everything has settled", () => {
+    expect(
+      hasWorkInFlight([{ status: "ready" }, { status: "failed" }, { status: "uploaded" }]),
+    ).toBe(false);
+  });
+
+  it("is true when any one document is processing", () => {
+    expect(hasWorkInFlight([{ status: "ready" }, { status: "processing" }])).toBe(true);
+  });
+
+  it("stops being true once the last run finishes", () => {
+    // What ends the polling loop: a timer that never stops is a battery and
+    // a rate-limit problem.
+    const before = [{ status: "processing" }];
+    const after = [{ status: "ready" }];
+
+    expect(hasWorkInFlight(before)).toBe(true);
+    expect(hasWorkInFlight(after)).toBe(false);
   });
 });

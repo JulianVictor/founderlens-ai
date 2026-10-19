@@ -62,6 +62,44 @@ document -> extraction -> cleaning -> chunking -> embeddings
          -> entity extraction -> entity resolution -> graph persistence
 ```
 
+### Orchestration  *(implemented)*
+
+The deterministic half runs as an explicit pipeline with its stages named in
+the database:
+
+```
+UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST
+```
+
+`UPLOAD` is where the pipeline *acquires* the stored bytes; the upload itself
+happened earlier, when the document was accepted. `EMBED` and `GRAPH` are not
+implemented, so **`ready` currently means deterministic parsing completed** and
+nothing more.
+
+`IngestionService` owns the sequence. Each stage is recorded before it runs, so
+a job killed mid-flight leaves behind the stage it was in rather than the last
+one it finished, and a failure says *where* it happened.
+
+**Two kinds of idempotency, handled in different places.** Two requests to
+process the same document are settled by the database: a partial unique index
+allows one queued-or-running job per document, so a second request joins the
+run already under way. Reading "is one active?" and then inserting would not
+be enough, because two callers can both read "no". Processing the same document
+twice *over time* is settled by deterministic chunk ids plus a replace: the
+same bytes recompute the same ids and update the same rows, so nothing is
+duplicated and nothing is orphaned.
+
+**A retry is a new job**, not a mutated one, so the history of what was tried
+survives. Running the same job twice is a no-op, because only a queued job can
+start -- the half an at-least-once queue would otherwise expose.
+
+Work runs in-process on the event loop behind a `TaskRunner` protocol. That is
+a deliberate MVP choice with limits written down where the runner is defined:
+work does not survive a restart, there is no cross-process coordination, and
+there is no backpressure. Each is a reason to move to a real queue later, and
+none was a reason to build one first. Replacing it is implementing the protocol
+again, not rewriting the service.
+
 Text extraction, cleaning and chunking live in `ai/ingestion/`. Entity
 extraction lives in `ai/extraction/`. The two "extraction" names refer to
 different operations; see the note in

@@ -7,11 +7,14 @@ import {
   type ApiDocument,
   deleteDocument,
   listDocuments,
+  processDocument,
   uploadDocument,
 } from "@/lib/api/documents";
 import {
+  canProcess,
   formatBytes,
   formatUploadedAt,
+  hasWorkInFlight,
   statusLabel,
   uploadErrorMessage,
 } from "@/lib/documents/format";
@@ -28,11 +31,15 @@ type LoadState =
 
 const ACCEPTED = ".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown";
 
+/** How often to re-check while a document is processing. */
+const POLL_INTERVAL_MS = 2000;
+
 export function DocumentManager({ workspaceId }: Props) {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [processingId, setProcessingId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   /** Current access token, or null if the session has gone. */
@@ -75,6 +82,19 @@ export function DocumentManager({ workspaceId }: Props) {
     void load();
     return () => controller.abort();
   }, [refresh]);
+
+  const inFlight = state.kind === "loaded" && hasWorkInFlight(state.documents);
+
+  useEffect(() => {
+    // Processing happens after the response, so the only way to learn it
+    // finished is to ask again. The interval is torn down as soon as nothing
+    // is running, rather than polling on a timer forever.
+    if (!inFlight) return;
+    const timer = setInterval(() => {
+      void refresh();
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [inFlight, refresh]);
 
   async function handleUpload(file: File) {
     setUploadError(null);
@@ -131,6 +151,31 @@ export function DocumentManager({ workspaceId }: Props) {
       );
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function handleProcess(document: ApiDocument) {
+    setProcessingId(document.id);
+    setUploadError(null);
+    try {
+      const token = await accessToken();
+      if (!token) {
+        setUploadError("Your session has expired. Sign in again.");
+        return;
+      }
+      await processDocument(workspaceId, token, document.id);
+      // Refreshed rather than patched locally: the server decides what state
+      // the document is in, and a job that failed immediately would otherwise
+      // be shown as processing until the next poll.
+      await refresh();
+    } catch (error) {
+      setUploadError(
+        error instanceof ApiError && error.status === 404
+          ? "That document is no longer available."
+          : "Could not start processing. Please try again.",
+      );
+    } finally {
+      setProcessingId(null);
     }
   }
 
@@ -229,9 +274,33 @@ export function DocumentManager({ workspaceId }: Props) {
                 ) : null}
               </div>
 
-              <span className="font-mono text-xs uppercase tracking-wider text-black/40 dark:text-white/40">
+              <span
+                aria-live={document.status === "processing" ? "polite" : undefined}
+                className={`font-mono text-xs uppercase tracking-wider ${
+                  document.status === "failed"
+                    ? "text-red-600 dark:text-red-400"
+                    : document.status === "ready"
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : "text-black/40 dark:text-white/40"
+                } ${document.status === "processing" ? "animate-pulse" : ""}`}
+              >
                 {statusLabel(document.status)}
               </span>
+
+              {canProcess(document.status) ? (
+                <button
+                  type="button"
+                  disabled={processingId === document.id}
+                  onClick={() => void handleProcess(document)}
+                  className="rounded-md border border-black/15 px-2.5 py-1 text-xs font-medium transition-colors hover:border-black/40 disabled:opacity-50 dark:border-white/15 dark:hover:border-white/40"
+                >
+                  {processingId === document.id
+                    ? "Starting…"
+                    : document.status === "failed"
+                      ? "Retry"
+                      : "Process"}
+                </button>
+              ) : null}
 
               <button
                 type="button"

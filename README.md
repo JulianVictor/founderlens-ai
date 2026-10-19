@@ -15,9 +15,12 @@ supporting chunks, graph paths and evaluation results are all inspectable.
 > `workspace_members` / `documents` behind row-level security, a reusable
 > FastAPI auth dependency, upload/listing/deletion of PDF, plain-text and
 > Markdown documents with server-side content-type detection, and
-> offset-preserving parsing, cleaning and chunking of those documents. **Embeddings,
-> entity extraction and retrieval are not implemented yet** -- chunks are
-> produced but not yet vectorised or added to the graph.
+> offset-preserving parsing, cleaning and chunking of those documents behind an
+> explicit `UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST` pipeline with job
+> tracking and idempotent reprocessing. **Embeddings, entity extraction and
+> retrieval are not implemented yet** -- `ready` currently means deterministic
+> parsing completed, and chunks are stored in Postgres but not vectorised or
+> added to the graph.
 
 ## Architecture
 

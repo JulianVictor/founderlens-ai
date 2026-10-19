@@ -22,11 +22,21 @@ import httpx
 from fastapi import Depends, Path, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.ai.ingestion import (
+    ChunkerConfig,
+    ParserRegistry,
+    TextCleaner,
+    Tokenizer,
+    build_default_registry,
+    get_tokenizer,
+)
+from app.core.background import TaskRunner
 from app.core.config import Settings, get_settings
 from app.core.db import Database
 from app.core.exceptions import AuthenticationError
 from app.core.security import AuthenticatedUser, SupabaseJWTVerifier
 from app.models.workspace import WorkspaceMembership, WorkspaceRole
+from app.repositories.chunk_repository import ChunkRepository, PostgresChunkRepository
 from app.repositories.document_repository import (
     DocumentRepository,
     PostgresDocumentRepository,
@@ -34,6 +44,10 @@ from app.repositories.document_repository import (
 from app.repositories.document_storage import (
     DocumentStorage,
     SupabaseDocumentStorage,
+)
+from app.repositories.ingestion_job_repository import (
+    IngestionJobRepository,
+    PostgresIngestionJobRepository,
 )
 from app.repositories.profile_repository import (
     PostgresProfileRepository,
@@ -44,6 +58,7 @@ from app.repositories.workspace_repository import (
     WorkspaceRepository,
 )
 from app.services.document_service import DocumentService
+from app.services.ingestion_service import IngestionService
 from app.services.profile_service import ProfileService
 from app.services.workspace_service import WorkspaceService
 
@@ -209,3 +224,82 @@ def require_workspace_role(
         return await service.require_membership(workspace_id, user.id, minimum_role=minimum_role)
 
     return dependency
+
+
+# --- Ingestion ---------------------------------------------------------------
+#
+# The parser registry, cleaner and tokenizer are built once for the process
+# rather than per request. Loading a tokenizer encoding costs real time, and
+# none of the three holds request state.
+
+
+@lru_cache(maxsize=1)
+def get_parser_registry() -> ParserRegistry:
+    return build_default_registry()
+
+
+@lru_cache(maxsize=1)
+def get_text_cleaner() -> TextCleaner:
+    return TextCleaner()
+
+
+@lru_cache(maxsize=1)
+def _cached_tokenizer(encoding_name: str) -> Tokenizer:
+    return get_tokenizer(encoding_name)
+
+
+def get_ingestion_tokenizer(settings: SettingsDep) -> Tokenizer:
+    return _cached_tokenizer(settings.tokenizer_encoding)
+
+
+def get_chunker_config(settings: SettingsDep) -> ChunkerConfig:
+    return ChunkerConfig(
+        chunk_size_tokens=settings.chunk_size_tokens,
+        chunk_overlap_tokens=settings.chunk_overlap_tokens,
+    )
+
+
+def get_ingestion_job_repository(database: DatabaseDep) -> IngestionJobRepository:
+    return PostgresIngestionJobRepository(database.pool)
+
+
+def get_chunk_repository(database: DatabaseDep) -> ChunkRepository:
+    return PostgresChunkRepository(database.pool)
+
+
+def get_task_runner(request: Request) -> TaskRunner:
+    """The application's background runner.
+
+    Held on the app rather than created per request: work submitted during a
+    request outlives it, and a runner that went out of scope with the request
+    could not be drained at shutdown.
+    """
+    runner: TaskRunner = request.app.state.task_runner
+    return runner
+
+
+def get_ingestion_service(
+    documents: Annotated[DocumentRepository, Depends(get_document_repository)],
+    jobs: Annotated[IngestionJobRepository, Depends(get_ingestion_job_repository)],
+    chunks: Annotated[ChunkRepository, Depends(get_chunk_repository)],
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)],
+    parsers: Annotated[ParserRegistry, Depends(get_parser_registry)],
+    cleaner: Annotated[TextCleaner, Depends(get_text_cleaner)],
+    tokenizer: Annotated[Tokenizer, Depends(get_ingestion_tokenizer)],
+    chunker_config: Annotated[ChunkerConfig, Depends(get_chunker_config)],
+    runner: Annotated[TaskRunner, Depends(get_task_runner)],
+) -> IngestionService:
+    return IngestionService(
+        documents=documents,
+        jobs=jobs,
+        chunks=chunks,
+        storage=storage,
+        parsers=parsers,
+        cleaner=cleaner,
+        tokenizer=tokenizer,
+        chunker_config=chunker_config,
+        runner=runner,
+    )
+
+
+IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]

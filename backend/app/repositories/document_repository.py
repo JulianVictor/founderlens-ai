@@ -57,6 +57,20 @@ _FIND_BY_CHECKSUM = """
        and checksum_sha256 = $2
 """
 
+# error_message is cleared unless the new status is 'failed', because the
+# documents_error_only_when_failed constraint rejects a stale explanation and,
+# more importantly, because showing one on a ready document would be a lie.
+_UPDATE_STATUS = """
+    update public.documents
+       set status = $3,
+           error_message = case when $3 = 'failed' then $4::text else null end
+     where workspace_id = $1
+       and id = $2
+    returning id, workspace_id, uploaded_by, filename, storage_path, mime_type,
+              size_bytes, checksum_sha256, status, error_message,
+              created_at, updated_at
+"""
+
 _DELETE = """
     delete from public.documents
      where workspace_id = $1
@@ -82,6 +96,22 @@ class DocumentRepository(Protocol):
 
     async def find_by_checksum(self, workspace_id: UUID, checksum_sha256: str) -> Document | None:
         """An existing document with the same content, if there is one."""
+        ...
+
+    async def update_status(
+        self,
+        workspace_id: UUID,
+        document_id: UUID,
+        status: DocumentStatus,
+        *,
+        error_message: str | None = None,
+    ) -> Document | None:
+        """Set the document's processing status.
+
+        ``error_message`` is kept only for the failed status; any other status
+        clears it, so a document that recovers does not keep explaining a
+        failure that no longer applies.
+        """
         ...
 
     async def delete(self, workspace_id: UUID, document_id: UUID) -> bool:
@@ -138,6 +168,19 @@ class PostgresDocumentRepository:
 
     async def find_by_checksum(self, workspace_id: UUID, checksum_sha256: str) -> Document | None:
         record = await self._pool.fetchrow(_FIND_BY_CHECKSUM, workspace_id, checksum_sha256)
+        return None if record is None else _to_document(record)
+
+    async def update_status(
+        self,
+        workspace_id: UUID,
+        document_id: UUID,
+        status: DocumentStatus,
+        *,
+        error_message: str | None = None,
+    ) -> Document | None:
+        record = await self._pool.fetchrow(
+            _UPDATE_STATUS, workspace_id, document_id, status.value, error_message
+        )
         return None if record is None else _to_document(record)
 
     async def delete(self, workspace_id: UUID, document_id: UUID) -> bool:

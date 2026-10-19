@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.errors import register_exception_handlers
 from app.api.router import api_router
+from app.core.background import BackgroundTaskRunner
 from app.core.config import Settings, get_settings
 from app.core.db import Database
 from app.core.logging import configure_logging
@@ -36,6 +37,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # Drained before the pool closes: a job killed mid-stage would
+            # leave a row saying 'running' that nothing will ever finish.
+            runner: BackgroundTaskRunner = app.state.task_runner
+            await runner.drain()
             client: httpx.AsyncClient = app.state.http_client
             await client.aclose()
             await database.disconnect()
@@ -49,6 +54,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Held on app.state rather than in a module global so that two apps in one
     # process (as in tests) do not share a pool.
     app.state.database = Database(resolved)
+    # In-process for now. Replacing it with a distributed worker is
+    # implementing TaskRunner again, not changing the service.
+    app.state.task_runner = BackgroundTaskRunner()
 
     app.add_middleware(
         CORSMiddleware,

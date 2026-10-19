@@ -47,6 +47,16 @@ PROTECTED_ROUTES: list[tuple[str, str, str]] = [
         "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
         f"/api/v1/workspaces/{WORKSPACE}/documents/{DOCUMENT}",
     ),
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/documents/{document_id}/process",
+        f"/api/v1/workspaces/{WORKSPACE}/documents/{DOCUMENT}/process",
+    ),
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/documents/{document_id}/processing-status",
+        f"/api/v1/workspaces/{WORKSPACE}/documents/{DOCUMENT}/processing-status",
+    ),
     ("GET", "/probe/workspaces/{workspace_id}", f"/probe/workspaces/{WORKSPACE}"),
 ]
 

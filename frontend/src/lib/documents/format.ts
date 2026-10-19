@@ -26,6 +26,33 @@ export function statusLabel(status: string): string {
   return STATUS_LABELS[status as DocumentStatus] ?? status;
 }
 
+/** Statuses from which starting (or re-starting) processing makes sense. */
+const PROCESSABLE: ReadonlySet<string> = new Set(["uploaded", "failed"]);
+
+/**
+ * Whether to offer a process action for a document.
+ *
+ * Offered for `failed` as well as `uploaded`, because a failure is often
+ * transient -- storage was briefly unreachable -- and the backend treats a
+ * retry as a fresh attempt rather than refusing one.
+ */
+export function canProcess(status: string): boolean {
+  return PROCESSABLE.has(status);
+}
+
+/**
+ * Whether any document is mid-flight, and the list is therefore stale.
+ *
+ * Processing happens after the response, so the only way a client learns it
+ * finished is by asking again. Polling stops as soon as nothing is running,
+ * rather than running on a timer forever.
+ */
+export function hasWorkInFlight(
+  documents: readonly { readonly status: string }[],
+): boolean {
+  return documents.some((document) => document.status === "processing");
+}
+
 /**
  * Size in units a person reads, using binary multiples to match how the limit
  * is expressed (25 MiB).

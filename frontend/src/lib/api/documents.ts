@@ -98,3 +98,37 @@ export async function deleteDocument(
   });
   if (!response.ok) throw await toApiError(response);
 }
+
+export type IngestionStage = "upload" | "extract" | "clean" | "chunk" | "persist";
+
+export type IngestionJob = {
+  readonly id: string;
+  readonly document_id: string;
+  readonly status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  readonly current_stage: IngestionStage;
+  readonly attempt: number;
+  readonly error_message: string | null;
+  readonly chunk_count: number | null;
+  readonly started_at: string | null;
+  readonly completed_at: string | null;
+  readonly created_at: string;
+};
+
+/**
+ * Start processing, or join the run already under way.
+ *
+ * The API is idempotent here: 202 means this call started it, 200 means one
+ * was already in flight. Both are success, so neither is treated as an error.
+ */
+export async function processDocument(
+  workspaceId: string,
+  accessToken: string,
+  documentId: string,
+): Promise<IngestionJob> {
+  const response = await fetch(`${documentsUrl(workspaceId)}/${documentId}/process`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw await toApiError(response);
+  return (await response.json()) as IngestionJob;
+}

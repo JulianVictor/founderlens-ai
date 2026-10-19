@@ -11,28 +11,37 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import replace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.ai.ingestion import DocumentChunk
 from app.api.deps import (
+    get_chunk_repository,
     get_document_repository,
     get_document_storage,
+    get_ingestion_job_repository,
     get_profile_repository,
+    get_task_runner,
     get_workspace_repository,
 )
+from app.core.background import TaskFactory, TaskRunner
 from app.core.config import Environment, Settings, get_settings
 from app.core.exceptions import DocumentStorageError
 from app.main import create_app
 from app.models.document import Document, DocumentStatus, NewDocument
+from app.models.ingestion import IngestionJob, IngestionJobStatus, IngestionStage
 from app.models.profile import Profile
 from app.models.workspace import Workspace, WorkspaceMembership, WorkspaceRole
+from app.repositories.chunk_repository import ChunkRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.document_storage import DocumentStorage
+from app.repositories.ingestion_job_repository import IngestionJobRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.repositories.workspace_repository import WorkspaceRepository
 from tests import probes
@@ -170,6 +179,9 @@ def app(
     profile_repository: FakeProfileRepository,
     document_repository: FakeDocumentRepository,
     document_storage: FakeDocumentStorage,
+    ingestion_job_repository: FakeIngestionJobRepository,
+    chunk_repository: FakeChunkRepository,
+    task_runner: DeferredTaskRunner,
 ) -> FastAPI:
     """Application wired to the in-memory repositories.
 
@@ -183,6 +195,11 @@ def app(
     application.dependency_overrides[get_profile_repository] = lambda: profile_repository
     application.dependency_overrides[get_document_repository] = lambda: document_repository
     application.dependency_overrides[get_document_storage] = lambda: document_storage
+    application.dependency_overrides[get_ingestion_job_repository] = lambda: (
+        ingestion_job_repository
+    )
+    application.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
+    application.dependency_overrides[get_task_runner] = lambda: task_runner
     application.include_router(probes.router)
     return application
 
@@ -265,11 +282,20 @@ class FakeDocumentStorage:
         #: Set to raise from the next upload, to exercise the failure paths.
         self.fail_upload = False
         self.fail_delete = False
+        self.fail_download = False
 
     async def upload(self, path: str, data: bytes, content_type: str) -> None:
         if self.fail_upload:
             raise DocumentStorageError("upload")
         self.objects[path] = data
+
+    async def download(self, path: str) -> bytes:
+        if self.fail_download:
+            raise DocumentStorageError("download")
+        try:
+            return self.objects[path]
+        except KeyError as exc:
+            raise DocumentStorageError("download") from exc
 
     async def delete(self, path: str) -> None:
         if self.fail_delete:
@@ -321,6 +347,28 @@ class FakeDocumentRepository:
         for d in self.documents:
             if d.workspace_id == workspace_id and d.checksum_sha256 == checksum_sha256:
                 return d
+        return None
+
+    async def update_status(
+        self,
+        workspace_id: UUID,
+        document_id: UUID,
+        status: DocumentStatus,
+        *,
+        error_message: str | None = None,
+    ) -> Document | None:
+        for index, d in enumerate(self.documents):
+            if d.id == document_id and d.workspace_id == workspace_id:
+                updated = replace(
+                    d,
+                    status=status,
+                    # Mirrors the database, which clears the explanation unless
+                    # the new status is failed.
+                    error_message=(error_message if status is DocumentStatus.FAILED else None),
+                    updated_at=dt.datetime.now(tz=dt.UTC),
+                )
+                self.documents[index] = updated
+                return updated
         return None
 
     async def delete(self, workspace_id: UUID, document_id: UUID) -> bool:
@@ -383,3 +431,194 @@ _: WorkspaceRepository = FakeWorkspaceRepository([])
 __: ProfileRepository = FakeProfileRepository({})
 ___: DocumentRepository = FakeDocumentRepository([])
 ____: DocumentStorage = FakeDocumentStorage()
+
+
+# --- Ingestion ---------------------------------------------------------------
+
+
+class FakeIngestionJobRepository:
+    """In-memory :class:`IngestionJobRepository`.
+
+    Reproduces the behaviour the real one gets from the database, because the
+    service's correctness depends on it: ``claim`` refuses while a job is
+    active (the one-active-job-per-document index) and ``start`` only moves a
+    job that is still queued (the ``status = 'queued'`` predicate). A fake that
+    said yes to everything would let the duplicate-work tests pass while the
+    real thing was broken.
+    """
+
+    def __init__(self) -> None:
+        self.jobs: list[IngestionJob] = []
+        #: Forces claim to fail, standing in for losing the insert race.
+        self.fail_claim = False
+
+    def _store(self, job: IngestionJob) -> IngestionJob:
+        for index, existing in enumerate(self.jobs):
+            if existing.id == job.id:
+                self.jobs[index] = job
+                return job
+        raise AssertionError("job not found")
+
+    async def claim(
+        self, workspace_id: UUID, document_id: UUID, pipeline_version: str
+    ) -> IngestionJob | None:
+        if self.fail_claim:
+            return None
+        if any(j.document_id == document_id and j.status.is_active for j in self.jobs):
+            return None
+        now = dt.datetime.now(tz=dt.UTC)
+        job = IngestionJob(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            document_id=document_id,
+            status=IngestionJobStatus.QUEUED,
+            current_stage=IngestionStage.UPLOAD,
+            attempt=sum(1 for j in self.jobs if j.document_id == document_id) + 1,
+            error_message=None,
+            chunk_count=None,
+            pipeline_version=pipeline_version,
+            started_at=None,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self.jobs.append(job)
+        return job
+
+    async def get(self, workspace_id: UUID, job_id: UUID) -> IngestionJob | None:
+        for job in self.jobs:
+            if job.id == job_id and job.workspace_id == workspace_id:
+                return job
+        return None
+
+    async def latest_for_document(
+        self, workspace_id: UUID, document_id: UUID
+    ) -> IngestionJob | None:
+        found = [
+            j for j in self.jobs if j.document_id == document_id and j.workspace_id == workspace_id
+        ]
+        return found[-1] if found else None
+
+    async def active_for_document(
+        self, workspace_id: UUID, document_id: UUID
+    ) -> IngestionJob | None:
+        for job in self.jobs:
+            if (
+                job.document_id == document_id
+                and job.workspace_id == workspace_id
+                and job.status.is_active
+            ):
+                return job
+        return None
+
+    async def start(self, job_id: UUID, stage: IngestionStage) -> IngestionJob | None:
+        for job in self.jobs:
+            if job.id == job_id and job.status is IngestionJobStatus.QUEUED:
+                return self._store(
+                    replace(
+                        job,
+                        status=IngestionJobStatus.RUNNING,
+                        current_stage=stage,
+                        started_at=dt.datetime.now(tz=dt.UTC),
+                    )
+                )
+        return None
+
+    async def advance(self, job_id: UUID, stage: IngestionStage) -> IngestionJob | None:
+        for job in self.jobs:
+            if job.id == job_id and job.status is IngestionJobStatus.RUNNING:
+                return self._store(replace(job, current_stage=stage))
+        return None
+
+    async def finish(
+        self,
+        job_id: UUID,
+        status: IngestionJobStatus,
+        *,
+        error_message: str | None = None,
+        chunk_count: int | None = None,
+    ) -> IngestionJob | None:
+        for job in self.jobs:
+            if job.id == job_id and job.status.is_active:
+                return self._store(
+                    replace(
+                        job,
+                        status=status,
+                        error_message=error_message,
+                        chunk_count=chunk_count,
+                        completed_at=dt.datetime.now(tz=dt.UTC),
+                    )
+                )
+        return None
+
+
+class FakeChunkRepository:
+    """In-memory :class:`ChunkRepository`, with the same replace semantics."""
+
+    def __init__(self) -> None:
+        self.chunks: dict[UUID, list[DocumentChunk]] = {}
+        self.tokenizer: str | None = None
+        #: How many times a replace happened, so a test can tell "wrote the
+        #: same chunks again" from "did not write at all".
+        self.replace_calls = 0
+
+    async def replace_for_document(
+        self,
+        workspace_id: UUID,
+        document_id: UUID,
+        chunks: list[DocumentChunk],
+        *,
+        tokenizer: str,
+        ingestion_job_id: UUID | None = None,
+    ) -> int:
+        self.replace_calls += 1
+        self.tokenizer = tokenizer
+        self.chunks[document_id] = list(chunks)
+        return len(chunks)
+
+    async def list_for_document(self, workspace_id: UUID, document_id: UUID) -> list[DocumentChunk]:
+        return list(self.chunks.get(document_id, []))
+
+    async def count_for_document(self, workspace_id: UUID, document_id: UUID) -> int:
+        return len(self.chunks.get(document_id, []))
+
+
+class DeferredTaskRunner:
+    """Captures submitted work instead of running it.
+
+    Lets a test observe the states a job passes through -- queued, then
+    running, then terminal -- which an inline runner would hide by finishing
+    everything before ``submit`` returned.
+    """
+
+    def __init__(self) -> None:
+        self.submitted: list[tuple[str, TaskFactory]] = []
+
+    async def submit(self, name: str, factory: TaskFactory) -> None:
+        self.submitted.append((name, factory))
+
+    async def run_all(self) -> None:
+        """Run everything submitted so far, in order."""
+        pending, self.submitted = self.submitted, []
+        for _name, factory in pending:
+            await factory()
+
+
+@pytest.fixture
+def ingestion_job_repository() -> FakeIngestionJobRepository:
+    return FakeIngestionJobRepository()
+
+
+@pytest.fixture
+def chunk_repository() -> FakeChunkRepository:
+    return FakeChunkRepository()
+
+
+@pytest.fixture
+def task_runner() -> DeferredTaskRunner:
+    return DeferredTaskRunner()
+
+
+_ingestion_jobs: IngestionJobRepository = FakeIngestionJobRepository()
+_chunks: ChunkRepository = FakeChunkRepository()
+_runner: TaskRunner = DeferredTaskRunner()

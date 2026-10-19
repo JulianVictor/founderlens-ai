@@ -47,6 +47,16 @@ class DocumentStorage(Protocol):
         """Write ``data`` to ``path``, replacing anything already there."""
         ...
 
+    async def download(self, path: str) -> bytes:
+        """Read the object at ``path``.
+
+        Raises:
+            DocumentStorageError: it could not be read, including when it is
+                not there. A missing object for a document that exists is a
+                broken deployment, not an empty file.
+        """
+        ...
+
     async def delete(self, path: str) -> None:
         """Remove the object at ``path``.
 
@@ -94,6 +104,19 @@ class SupabaseDocumentStorage:
             # only the status is logged.
             logger.error("Storage upload to %s rejected with %s", path, response.status_code)
             raise DocumentStorageError("upload")
+
+    async def download(self, path: str) -> bytes:
+        try:
+            response = await self._client.get(self._object_url(path), headers=self._headers())
+        except httpx.HTTPError as exc:
+            logger.exception("Storage download of %s failed", path)
+            raise DocumentStorageError("download") from exc
+
+        if response.status_code >= 400:
+            logger.error("Storage download of %s rejected with %s", path, response.status_code)
+            raise DocumentStorageError("download")
+
+        return response.content
 
     async def delete(self, path: str) -> None:
         try:

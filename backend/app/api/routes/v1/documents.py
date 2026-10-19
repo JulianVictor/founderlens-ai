@@ -11,11 +11,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, Path, UploadFile, status
+from fastapi import APIRouter, File, Path, Response, UploadFile, status
 
-from app.api.deps import DocumentServiceDep, WorkspaceMember
+from app.api.deps import DocumentServiceDep, IngestionServiceDep, WorkspaceMember
 from app.core.exceptions import DocumentTooLargeError
 from app.schemas.document import DocumentListResponse, DocumentResponse
+from app.schemas.ingestion import IngestionJobResponse, ProcessingStatusResponse
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/documents",
@@ -122,3 +123,48 @@ async def delete_document(
 ) -> None:
     """Delete a document, its stored object and its derived data."""
     await documents.delete(membership.workspace.id, document_id)
+
+
+@router.post(
+    "/{document_id}/process",
+    response_model=IngestionJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start deterministic processing of a document",
+)
+async def process_document(
+    membership: WorkspaceMember,
+    ingestion: IngestionServiceDep,
+    document_id: DocumentId,
+    response: Response,
+) -> IngestionJobResponse:
+    """Parse, clean and chunk the document.
+
+    Idempotent. Asking twice while a run is in flight returns the run already
+    under way, with 200 rather than 202, instead of starting a second one or
+    refusing -- a double-click is not a mistake worth an error, and the
+    guarantee that matters (one run at a time) is enforced regardless.
+
+    Returns as soon as the work is accepted; it is not finished when this
+    responds. Poll the processing-status endpoint to follow it.
+    """
+    job, created = await ingestion.request_processing(membership.workspace.id, document_id)
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return IngestionJobResponse.from_job(job)
+
+
+@router.get(
+    "/{document_id}/processing-status",
+    response_model=ProcessingStatusResponse,
+    summary="Progress of a document's processing",
+)
+async def get_processing_status(
+    membership: WorkspaceMember,
+    ingestion: IngestionServiceDep,
+    document_id: DocumentId,
+) -> ProcessingStatusResponse:
+    """Report the document's status and its most recent run."""
+    document, job, chunk_count = await ingestion.status_for_document(
+        membership.workspace.id, document_id
+    )
+    return ProcessingStatusResponse.build(document, job, chunk_count)
