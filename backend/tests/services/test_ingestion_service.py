@@ -14,14 +14,18 @@ from app.models.ingestion import IngestionJob, IngestionJobStatus, IngestionStag
 from app.services.ingestion_service import PIPELINE_VERSION, IngestionService
 from tests.conftest import (
     DOCUMENT_ID,
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_MODEL,
     OTHER_DOCUMENT_ID,
     OTHER_WORKSPACE_ID,
     UNKNOWN_DOCUMENT_ID,
     WORKSPACE_ID,
     DeferredTaskRunner,
+    FakeChunkGraph,
     FakeChunkRepository,
     FakeDocumentRepository,
     FakeDocumentStorage,
+    FakeEmbeddingProvider,
     FakeIngestionJobRepository,
 )
 
@@ -41,6 +45,8 @@ def service(
     ingestion_job_repository: FakeIngestionJobRepository,
     chunk_repository: FakeChunkRepository,
     document_storage: FakeDocumentStorage,
+    embedding_provider: FakeEmbeddingProvider,
+    chunk_graph: FakeChunkGraph,
     task_runner: DeferredTaskRunner,
 ) -> IngestionService:
     return IngestionService(
@@ -52,6 +58,8 @@ def service(
         cleaner=TextCleaner(),
         tokenizer=HeuristicTokenizer(),
         chunker_config=ChunkerConfig(chunk_size_tokens=40, chunk_overlap_tokens=10),
+        embeddings=embedding_provider,
+        graph=chunk_graph,
         runner=task_runner,
     )
 
@@ -127,7 +135,7 @@ class TestSuccessfulProcessing:
 
         job = ingestion_job_repository.jobs[-1]
         assert job.status is IngestionJobStatus.SUCCEEDED
-        assert job.current_stage is IngestionStage.PERSIST
+        assert job.current_stage is IngestionStage.INDEX
         assert job.error_message is None
         assert job.chunk_count == len(chunk_repository.chunks[DOCUMENT_ID])
         assert job.started_at is not None
@@ -213,6 +221,8 @@ class TestStateTransitions:
             IngestionStage.CLEAN,
             IngestionStage.CHUNK,
             IngestionStage.PERSIST,
+            IngestionStage.EMBED,
+            IngestionStage.INDEX,
         ]
 
     async def test_document_is_processing_while_the_job_runs(
@@ -248,7 +258,7 @@ class TestStateTransitions:
 
         assert [stage.order for stage in stages] == list(range(len(stages)))
         assert stages[0] is IngestionStage.UPLOAD
-        assert stages[-1] is IngestionStage.PERSIST
+        assert stages[-1] is IngestionStage.INDEX
 
     async def test_active_and_terminal_partition_the_statuses(self) -> None:
         for status in IngestionJobStatus:
@@ -634,3 +644,311 @@ class TestAuthorisationAndStatus:
     ) -> None:
         with pytest.raises(DocumentNotFoundError):
             await service.status_for_document(WORKSPACE_ID, OTHER_DOCUMENT_ID)
+
+
+class TestEmbedding:
+    async def test_every_chunk_is_embedded(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_repository: FakeChunkRepository,
+        embedding_provider: FakeEmbeddingProvider,
+    ) -> None:
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        chunks = chunk_repository.chunks[DOCUMENT_ID]
+        assert embedding_provider.calls == [[chunk.text for chunk in chunks]]
+
+    async def test_the_whole_document_is_one_call(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+    ) -> None:
+        """The provider batches internally and knows its own per-request
+        limits; the service does not, so it hands over everything at once."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        assert len(embedding_provider.calls) == 1
+
+    async def test_the_provider_batches_within_that_call(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+        chunk_repository: FakeChunkRepository,
+    ) -> None:
+        # Smaller than the number of chunks this document produces, so the
+        # split is actually exercised rather than coincidentally skipped.
+        embedding_provider.batch_size = 2
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        chunk_count = len(chunk_repository.chunks[DOCUMENT_ID])
+        assert chunk_count > 2
+        assert len(embedding_provider.batches) > 1
+        assert sum(len(batch) for batch in embedding_provider.batches) == chunk_count
+
+    async def test_an_embedding_failure_fails_the_job_at_the_embed_stage(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+        ingestion_job_repository: FakeIngestionJobRepository,
+    ) -> None:
+        embedding_provider.fail = True
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        job = ingestion_job_repository.jobs[-1]
+        assert job.status is IngestionJobStatus.FAILED
+        assert job.current_stage is IngestionStage.EMBED
+
+    async def test_an_embedding_failure_does_not_name_the_provider(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+        ingestion_job_repository: FakeIngestionJobRepository,
+    ) -> None:
+        """Infrastructure the user cannot act on. The detail goes to logs."""
+        embedding_provider.fail = True
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        message = ingestion_job_repository.jobs[-1].error_message
+        assert message is not None
+        assert EMBEDDING_MODEL not in message
+        assert "unavailable" in message
+
+    async def test_a_dimension_mismatch_is_reported_as_configuration(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+        ingestion_job_repository: FakeIngestionJobRepository,
+    ) -> None:
+        """Retrying changes nothing until somebody fixes the model or the
+        configured width, so the message must not suggest that it will."""
+        embedding_provider.wrong_dimensions = EMBEDDING_DIMENSIONS + 1
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        message = ingestion_job_repository.jobs[-1].error_message
+        assert message is not None
+        assert "configuration" in message.lower()
+
+    async def test_an_embedding_failure_leaves_nothing_in_the_graph(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        embedding_provider: FakeEmbeddingProvider,
+        chunk_graph: FakeChunkGraph,
+    ) -> None:
+        embedding_provider.fail = True
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        assert chunk_graph.index_calls == 0
+
+
+class TestGraphIndexing:
+    async def test_chunks_reach_the_graph_with_their_vectors(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        chunk_repository: FakeChunkRepository,
+    ) -> None:
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        indexed = chunk_graph.chunks[DOCUMENT_ID]
+        assert len(indexed) == len(chunk_repository.chunks[DOCUMENT_ID])
+        for payload in indexed.values():
+            embedding = payload["embedding"]
+            assert isinstance(embedding, list)
+            assert len(embedding) == EMBEDDING_DIMENSIONS
+
+    async def test_every_indexed_chunk_carries_its_workspace(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+    ) -> None:
+        """Neo4j has no row-level security, so this property is the whole of
+        the isolation guarantee for later retrieval."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        for payload in chunk_graph.chunks[DOCUMENT_ID].values():
+            assert payload["workspace_id"] == str(WORKSPACE_ID)
+            assert payload["document_id"] == str(DOCUMENT_ID)
+
+    async def test_the_document_node_carries_its_filename(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        document_repository: FakeDocumentRepository,
+    ) -> None:
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        document = await document_repository.get(WORKSPACE_ID, DOCUMENT_ID)
+        assert document is not None
+        assert chunk_graph.documents[DOCUMENT_ID]["filename"] == document.filename
+
+    async def test_a_graph_failure_fails_the_job_at_the_index_stage(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        ingestion_job_repository: FakeIngestionJobRepository,
+    ) -> None:
+        chunk_graph.fail = True
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        job = ingestion_job_repository.jobs[-1]
+        assert job.status is IngestionJobStatus.FAILED
+        assert job.current_stage is IngestionStage.INDEX
+
+    async def test_a_graph_failure_leaves_the_document_not_ready(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        document_repository: FakeDocumentRepository,
+    ) -> None:
+        """Ready means retrievable. A document whose chunks never reached the
+        index is not, even though Postgres holds them."""
+        chunk_graph.fail = True
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        document = await document_repository.get(WORKSPACE_ID, DOCUMENT_ID)
+        assert document is not None
+        assert document.status is DocumentStatus.FAILED
+
+    async def test_a_retry_after_a_graph_failure_indexes_successfully(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        document_repository: FakeDocumentRepository,
+    ) -> None:
+        chunk_graph.fail = True
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        chunk_graph.fail = False
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        document = await document_repository.get(WORKSPACE_ID, DOCUMENT_ID)
+        assert document is not None
+        assert document.status is DocumentStatus.READY
+        assert chunk_graph.chunks[DOCUMENT_ID]
+
+
+class TestIdempotentGraphIndexing:
+    async def test_reprocessing_does_not_duplicate_graph_chunks(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+    ) -> None:
+        """The headline guarantee, now on the graph side as well."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+        first = set(chunk_graph.chunks[DOCUMENT_ID])
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+        second = set(chunk_graph.chunks[DOCUMENT_ID])
+
+        assert second == first
+
+    async def test_reprocessing_writes_identical_node_payloads(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+    ) -> None:
+        """Deterministic chunking plus deterministic embedding means the
+        second run sends the graph exactly what the first did."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+        first = {key: dict(value) for key, value in chunk_graph.chunks[DOCUMENT_ID].items()}
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        assert chunk_graph.chunks[DOCUMENT_ID] == first
+
+    async def test_changed_content_replaces_the_graph_chunks(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        document_repository: FakeDocumentRepository,
+        document_storage: FakeDocumentStorage,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+    ) -> None:
+        """Nodes from the old content must not survive as evidence the
+        document no longer supports."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+        before = set(chunk_graph.chunks[DOCUMENT_ID])
+
+        document = document_repository.documents[0]
+        document_storage.objects[document.storage_path] = b"Entirely different text."
+
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+        after = set(chunk_graph.chunks[DOCUMENT_ID])
+
+        assert before.isdisjoint(after)
+        assert len(after) == 1
+
+    async def test_the_graph_and_postgres_agree_on_the_chunk_set(
+        self,
+        service: IngestionService,
+        stored_text_document: None,
+        task_runner: DeferredTaskRunner,
+        chunk_graph: FakeChunkGraph,
+        chunk_repository: FakeChunkRepository,
+    ) -> None:
+        """Postgres stages what the graph indexes; a divergence means one of
+        them is describing a document that does not exist."""
+        await service.request_processing(WORKSPACE_ID, DOCUMENT_ID)
+        await task_runner.run_all()
+
+        staged = {str(chunk.chunk_id) for chunk in chunk_repository.chunks[DOCUMENT_ID]}
+        indexed = set(chunk_graph.chunks[DOCUMENT_ID])
+        assert staged == indexed

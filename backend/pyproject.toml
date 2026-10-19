@@ -20,6 +20,8 @@ dependencies = [
     # Token counting for chunk sizing. Optional at runtime: ingestion falls
     # back to an approximate counter when the encoding cannot be loaded.
     "tiktoken>=0.7",
+    # Neo4j async driver: the graph and the chunk vector index.
+    "neo4j>=5.23",
 ]
 
 [project.optional-dependencies]

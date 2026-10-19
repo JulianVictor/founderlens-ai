@@ -153,3 +153,60 @@ class DocumentParseError(FounderLensError):
         super().__init__(f"Could not parse document {document_id}: {reason}")
         self.document_id = document_id
         self.reason = reason
+
+
+class EmbeddingError(FounderLensError):
+    """The embedding provider could not produce vectors.
+
+    A dependency failure rather than a caller mistake: the document is fine
+    and retrying may work, so it must not be reported as the document's fault.
+    """
+
+    def __init__(self, provider: str, reason: str) -> None:
+        super().__init__(f"Embedding failed via {provider}: {reason}")
+        self.provider = provider
+        self.reason = reason
+
+
+class EmbeddingDimensionError(FounderLensError):
+    """A vector came back the wrong width.
+
+    Caught here rather than at the index, because a vector index rejects a
+    mismatched vector with an error that names the index, not the model or
+    the gateway that actually caused it. Usually means the configured model
+    and EMBEDDING_DIMENSIONS disagree, or a proxy is truncating.
+    """
+
+    def __init__(self, *, model: str, expected: int, actual: int, index: int) -> None:
+        super().__init__(
+            f"{model} returned a {actual}-dimension vector at position {index}; expected {expected}"
+        )
+        self.model = model
+        self.expected = expected
+        self.actual = actual
+        self.index = index
+
+
+class EmptyEmbeddingInputError(FounderLensError):
+    """A blank string was handed to the embedder.
+
+    Chunks are non-blank by construction, so this is a bug upstream rather
+    than bad user input.
+    """
+
+    def __init__(self, index: int) -> None:
+        super().__init__(f"Cannot embed blank text at position {index}")
+        self.index = index
+
+
+class GraphError(FounderLensError):
+    """Neo4j could not be reached, or refused the operation.
+
+    Like storage, a dependency failure: the caller did nothing wrong.
+    """
+
+    def __init__(self, operation: str, reason: str | None = None) -> None:
+        detail = f": {reason}" if reason else ""
+        super().__init__(f"Graph {operation} failed{detail}")
+        self.operation = operation
+        self.reason = reason

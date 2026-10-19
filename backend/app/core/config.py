@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: SecretStr = SecretStr("")
+    neo4j_database: str = "neo4j"
+    neo4j_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # --- LLM provider ---------------------------------------------------
     llm_provider: LLMProvider = LLMProvider.OPENAI
@@ -103,6 +105,16 @@ class Settings(BaseSettings):
     embedding_provider: EmbeddingProvider = EmbeddingProvider.OPENAI
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = Field(default=1536, gt=0)
+    # Separate from the LLM key: the two can be different accounts, and a
+    # deployment that embeds but does not generate should not need both.
+    embedding_api_key: SecretStr = SecretStr("")
+    # Overridable so an OpenAI-compatible endpoint (Azure, a gateway, a local
+    # server) works without a code change.
+    embedding_base_url: str = "https://api.openai.com/v1"
+    # Texts per request. Large enough that a document is a handful of calls,
+    # small enough to stay inside the provider's per-request token ceiling.
+    embedding_batch_size: int = Field(default=64, gt=0, le=2048)
+    embedding_timeout_seconds: float = Field(default=60.0, gt=0)
 
 
 @lru_cache(maxsize=1)

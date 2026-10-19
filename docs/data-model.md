@@ -387,11 +387,18 @@ a reason to have more edges.
   [ADR 001](adr/001-neo4j-for-vector-and-graph-retrieval.md).
 - A **full-text index** on entity `name` and `aliases`, to anchor a question's
   named entities onto graph nodes before traversal.
-- **Uniqueness constraints** on a single `uid` property per label, where
-  `uid = "<workspace_id>:<entity_id>"`. A single-property constraint is used
-  deliberately: node key constraints are a Neo4j Enterprise feature, and the
-  development stack runs `neo4j:5.26-community`. Composing the workspace into
-  the key makes cross-workspace collision impossible by construction.
+- **Uniqueness constraints** on a single property per label. Node key
+  constraints are a Neo4j Enterprise feature and the development stack runs
+  `neo4j:5.26-community`, so a single-property constraint is used throughout.
+  `:Document` and `:Chunk` constrain `id` directly, because those ids are
+  UUIDs minted by Postgres and already unique across every workspace. Entities
+  the resolution pipeline mints get a composed
+  `uid = "<workspace_id>:<entity_id>"`, where composing the workspace into the
+  key is what makes cross-workspace collision impossible.
+- **A mandatory-property constraint** on `workspace_id` for `:Document` and
+  `:Chunk`. Neo4j has no row-level security, so a node without it would be
+  invisible to every scoped query and returned to everyone by one that forgot
+  to scope.
 - **Range indexes** on `workspace_id` for each label, since it is a predicate on
   essentially every query.
 

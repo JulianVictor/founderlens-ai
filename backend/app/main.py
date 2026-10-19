@@ -9,12 +9,14 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.ai.graph import Neo4jChunkGraph
 from app.api.errors import register_exception_handlers
 from app.api.router import api_router
 from app.core.background import BackgroundTaskRunner
 from app.core.config import Settings, get_settings
 from app.core.db import Database
 from app.core.logging import configure_logging
+from app.core.neo4j import Neo4jDatabase
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -34,6 +36,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database: Database = app.state.database
         await database.connect()
         app.state.http_client = httpx.AsyncClient(timeout=resolved.storage_timeout_seconds)
+
+        graph_database: Neo4jDatabase = app.state.graph_database
+        await graph_database.connect()
+        # Verified rather than assumed: a bad URI or password should fail the
+        # deployment, not the first document somebody tries to ingest.
+        await graph_database.verify()
+        # Idempotent, so it runs every boot. Neo4j has no migration tool, and
+        # a vector index that silently does not exist turns retrieval into
+        # a full scan rather than an error.
+        await Neo4jChunkGraph(graph_database).apply_schema(resolved.embedding_dimensions)
         try:
             yield
         finally:
@@ -43,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await runner.drain()
             client: httpx.AsyncClient = app.state.http_client
             await client.aclose()
+            await graph_database.disconnect()
             await database.disconnect()
 
     app = FastAPI(
@@ -57,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # In-process for now. Replacing it with a distributed worker is
     # implementing TaskRunner again, not changing the service.
     app.state.task_runner = BackgroundTaskRunner()
+    app.state.graph_database = Neo4jDatabase(resolved)
 
     app.add_middleware(
         CORSMiddleware,

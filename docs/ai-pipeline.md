@@ -68,13 +68,14 @@ The deterministic half runs as an explicit pipeline with its stages named in
 the database:
 
 ```
-UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST
+UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST -> EMBED -> INDEX
 ```
 
 `UPLOAD` is where the pipeline *acquires* the stored bytes; the upload itself
-happened earlier, when the document was accepted. `EMBED` and `GRAPH` are not
-implemented, so **`ready` currently means deterministic parsing completed** and
-nothing more.
+happened earlier, when the document was accepted. `PERSIST` stages chunks in
+Postgres, `EMBED` vectorises them and `INDEX` writes nodes and vectors into
+Neo4j, so **`ready` now means a document is retrievable**. Entity extraction
+and graph construction are still to come, and nothing answers questions yet.
 
 `IngestionService` owns the sequence. Each stage is recorded before it runs, so
 a job killed mid-flight leaves behind the stage it was in rather than the last
@@ -232,9 +233,30 @@ chunk is a fresh count of the text actually emitted.
 Per the engineering rules, a whole document is never sent to the LLM where
 chunking is appropriate.
 
-### `embeddings/`
+### `embeddings/`  *(implemented)*
 
 **Responsibility.** Turn chunk text into vectors, behind a provider interface.
+
+Provider and model come entirely from configuration — `EMBEDDING_PROVIDER`,
+`EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL` — and nothing
+carries a usable default, so an unconfigured deployment fails at startup rather
+than embedding against somebody's account. Spoken over HTTP rather than through
+a vendor SDK, so any OpenAI-compatible endpoint works by changing a URL.
+
+Two guarantees every implementation owes its callers:
+
+- **Order is preserved.** `embed_texts` returns one vector per input, in the
+  same order. The response is re-ordered by the index the provider reports
+  rather than by array position — the API documents that results may arrive
+  out of order, and a silently mis-ordered batch attaches each chunk's vector
+  to a *different* chunk. That is wrong retrieval with no error anywhere.
+- **Dimensions are checked**, here rather than at the index. A vector index
+  rejects a mismatched vector with an error naming the index, not the model or
+  the gateway that caused it.
+
+Batches are issued sequentially. Providers rate-limit per minute, and the
+document that fires twenty parallel requests is the one most likely to be
+throttled — turning a slow ingestion into a failed one.
 
 Defines the provider protocol, handles batching, retries and rate limits, and
 records which model produced each vector. Vectors from different models are not
@@ -283,10 +305,26 @@ are one node or three, and it is scoped to a workspace: entities are never
 merged across workspaces, because that would leak the existence of one
 workspace's data into another.
 
-### `graph/`
+### `graph/`  *(partly implemented)*
 
 **Responsibility.** All Neo4j access — writes, and the constrained read
 templates.
+
+Implemented so far: the schema (constraints, property indexes, a cosine vector
+index on `:Chunk(embedding)`, a full-text index on `:Chunk(text)`) and the
+`:Document`/`:Chunk` upsert with `HAS_CHUNK`. Entity nodes and retrieval
+templates are later.
+
+Re-indexing is a replace, not an append: stale chunks are `DETACH DELETE`d
+*before* the new ones are merged, because the other order leaves a window in
+which the document has both its old and new chunks. `MERGE` on the
+deterministic chunk id — and on the relationship — means a second run
+updates the same nodes and adds no second edge.
+
+**Every node carries `workspace_id`, and a constraint makes it mandatory.**
+Neo4j has no row-level security, so that property plus a filter in every
+template is the entire isolation guarantee on this path; a node without it
+would be returned to anyone by a query that forgot to scope.
 
 On the write side: upsert nodes and relationships idempotently keyed by
 `(workspace_id, entity_id)`, attach provenance (`source_chunk_ids`,

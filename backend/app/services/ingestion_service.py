@@ -1,11 +1,13 @@
 """The ingestion pipeline: from a stored document to persisted chunks.
 
-    UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST
+    UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST -> EMBED -> INDEX
 
 ``UPLOAD`` is where the pipeline *acquires* the stored bytes; the upload itself
-happened earlier, when the document was accepted. ``EMBED`` and ``GRAPH`` come
-later and are not implemented, so ``ready`` currently means deterministic
-parsing completed and nothing more.
+happened earlier, when the document was accepted. ``PERSIST`` stages chunks in
+Postgres, ``EMBED`` vectorises them and ``INDEX`` writes nodes and vectors into
+Neo4j, so ``ready`` now means a document is retrievable. Entity extraction and
+graph construction are still to come, and answering questions is not
+implemented.
 
 Idempotency
 -----------
@@ -18,9 +20,11 @@ places.
   than starting a rival run. Reading "is one active?" and then inserting would
   not be enough -- two callers can both read "no".
 * **Processing the same document twice over time.** Settled by deterministic
-  chunk ids and a replace: re-running over unchanged bytes recomputes the same
-  ids and updates the same rows, so no chunk is duplicated and none is
-  orphaned.
+  chunk ids and a replace, in both stores: re-running over unchanged bytes
+  recomputes the same ids, so Postgres updates the same rows and Neo4j MERGEs
+  the same nodes and the same ``HAS_CHUNK`` edges. Nothing is duplicated, and
+  chunks the new run did not produce are removed rather than left behind as
+  evidence the document no longer supports.
 
 Failure
 -------
@@ -35,6 +39,8 @@ import logging
 from typing import Final
 from uuid import UUID
 
+from app.ai.embeddings import EmbeddingProvider
+from app.ai.graph import ChunkGraph
 from app.ai.ingestion import (
     ChunkerConfig,
     ParserRegistry,
@@ -47,6 +53,9 @@ from app.core.exceptions import (
     DocumentNotFoundError,
     DocumentParseError,
     DocumentStorageError,
+    EmbeddingDimensionError,
+    EmbeddingError,
+    GraphError,
 )
 from app.models.document import Document, DocumentStatus
 from app.models.ingestion import IngestionJob, IngestionJobStatus, IngestionStage
@@ -61,7 +70,7 @@ logger: Final = logging.getLogger(__name__)
 #: parsing, cleaning or chunking means existing chunks are no longer what this
 #: pipeline would produce -- that is what makes "which documents need
 #: re-running" answerable instead of a guess.
-PIPELINE_VERSION: Final = "2026.10.1-deterministic"
+PIPELINE_VERSION: Final = "2026.10.2-embedded"
 
 #: Reported to the caller when a stage fails for a reason that is not the
 #: document's fault. The specific cause goes to the logs: an error message is
@@ -83,6 +92,8 @@ class IngestionService:
         cleaner: TextCleaner,
         tokenizer: Tokenizer,
         chunker_config: ChunkerConfig,
+        embeddings: EmbeddingProvider,
+        graph: ChunkGraph,
         runner: TaskRunner,
     ) -> None:
         self._documents = documents
@@ -92,6 +103,8 @@ class IngestionService:
         self._parsers = parsers
         self._cleaner = cleaner
         self._chunker = TextChunker(tokenizer, chunker_config)
+        self._embeddings = embeddings
+        self._graph = graph
         self._runner = runner
 
     # --- starting -------------------------------------------------------
@@ -174,9 +187,15 @@ class IngestionService:
 
         try:
             chunk_count = await self._execute_stages(workspace_id, job_id, document)
-        except (DocumentParseError, DocumentStorageError) as exc:
+        except (
+            DocumentParseError,
+            DocumentStorageError,
+            EmbeddingError,
+            EmbeddingDimensionError,
+            GraphError,
+        ) as exc:
             # Expected failures with a cause worth telling the user about: a
-            # corrupt PDF, an unreachable bucket.
+            # corrupt PDF, an unreachable bucket, a provider that is down.
             await self._fail(workspace_id, job_id, document, self._reason(exc))
             return
         except Exception:
@@ -212,13 +231,30 @@ class IngestionService:
         chunks = self._chunker.chunk(cleaned)
 
         await self._jobs.advance(job_id, IngestionStage.PERSIST)
-        return await self._chunks.replace_for_document(
+        chunk_count = await self._chunks.replace_for_document(
             workspace_id,
             document.id,
             chunks,
             tokenizer=self._chunker.tokenizer_name,
             ingestion_job_id=job_id,
         )
+
+        await self._jobs.advance(job_id, IngestionStage.EMBED)
+        # One call for the whole document: the provider batches internally and
+        # knows its own per-request limits, which this service does not.
+        embeddings = await self._embeddings.embed_texts([chunk.text for chunk in chunks])
+
+        await self._jobs.advance(job_id, IngestionStage.INDEX)
+        await self._graph.index_document(
+            workspace_id=workspace_id,
+            document_id=document.id,
+            filename=document.filename,
+            mime_type=document.mime_type,
+            chunks=chunks,
+            embeddings=embeddings,
+            embedding_model=self._embeddings.model,
+        )
+        return chunk_count
 
     async def _fail(
         self, workspace_id: UUID, job_id: UUID, document: Document, reason: str
@@ -235,7 +271,27 @@ class IngestionService:
         )
 
     @staticmethod
-    def _reason(exc: DocumentParseError | DocumentStorageError) -> str:
+    def _reason(
+        exc: DocumentParseError
+        | DocumentStorageError
+        | EmbeddingError
+        | EmbeddingDimensionError
+        | GraphError,
+    ) -> str:
+        """What to show the user for an expected failure.
+
+        A parse error names something about their file, so it is passed
+        through. The rest are infrastructure, and naming the provider or the
+        database would tell them nothing they can act on.
+        """
         if isinstance(exc, DocumentParseError):
             return exc.reason
-        return "Document storage is unavailable. Please try again."
+        if isinstance(exc, DocumentStorageError):
+            return "Document storage is unavailable. Please try again."
+        if isinstance(exc, EmbeddingDimensionError):
+            # A configuration fault, not a transient one: retrying changes
+            # nothing until somebody fixes the model or the dimension.
+            return "Embedding configuration is inconsistent. Contact support."
+        if isinstance(exc, EmbeddingError):
+            return "The embedding service is unavailable. Please try again."
+        return "The knowledge graph is unavailable. Please try again."

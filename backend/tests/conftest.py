@@ -10,7 +10,7 @@ rows is Postgres's job.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,11 +20,16 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.ai.embeddings import EmbeddingProvider
+from app.ai.embeddings.provider import validate_dimensions, validate_input
+from app.ai.graph import ChunkGraph, build_chunk_payload
 from app.ai.ingestion import DocumentChunk
 from app.api.deps import (
+    get_chunk_graph,
     get_chunk_repository,
     get_document_repository,
     get_document_storage,
+    get_embedding_provider,
     get_ingestion_job_repository,
     get_profile_repository,
     get_task_runner,
@@ -32,7 +37,7 @@ from app.api.deps import (
 )
 from app.core.background import TaskFactory, TaskRunner
 from app.core.config import Environment, Settings, get_settings
-from app.core.exceptions import DocumentStorageError
+from app.core.exceptions import DocumentStorageError, EmbeddingError, GraphError
 from app.main import create_app
 from app.models.document import Document, DocumentStatus, NewDocument
 from app.models.ingestion import IngestionJob, IngestionJobStatus, IngestionStage
@@ -181,6 +186,8 @@ def app(
     document_storage: FakeDocumentStorage,
     ingestion_job_repository: FakeIngestionJobRepository,
     chunk_repository: FakeChunkRepository,
+    embedding_provider: FakeEmbeddingProvider,
+    chunk_graph: FakeChunkGraph,
     task_runner: DeferredTaskRunner,
 ) -> FastAPI:
     """Application wired to the in-memory repositories.
@@ -199,6 +206,8 @@ def app(
         ingestion_job_repository
     )
     application.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
+    application.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
+    application.dependency_overrides[get_chunk_graph] = lambda: chunk_graph
     application.dependency_overrides[get_task_runner] = lambda: task_runner
     application.include_router(probes.router)
     return application
@@ -622,3 +631,148 @@ def task_runner() -> DeferredTaskRunner:
 _ingestion_jobs: IngestionJobRepository = FakeIngestionJobRepository()
 _chunks: ChunkRepository = FakeChunkRepository()
 _runner: TaskRunner = DeferredTaskRunner()
+
+
+# --- Embeddings and graph ----------------------------------------------------
+
+EMBEDDING_DIMENSIONS = 8
+EMBEDDING_MODEL = "fake-embedding-model"
+
+
+class FakeEmbeddingProvider:
+    """In-memory :class:`EmbeddingProvider` with deterministic vectors.
+
+    Vectors are derived from the text, so two runs over the same document
+    produce identical ones -- which is what lets a test tell "re-indexed the
+    same content" from "produced something new". It also records the batches
+    it was asked for, so batching behaviour can be asserted without a network.
+    """
+
+    def __init__(
+        self,
+        dimensions: int = EMBEDDING_DIMENSIONS,
+        model: str = EMBEDDING_MODEL,
+        batch_size: int = 3,
+    ) -> None:
+        self._dimensions = dimensions
+        self._model = model
+        #: Public so a test can make a document span several batches.
+        self.batch_size = batch_size
+        #: Each call's inputs, so order preservation is checkable.
+        self.calls: list[list[str]] = []
+        #: Each batch actually issued, so batching is checkable.
+        self.batches: list[list[str]] = []
+        self.fail = False
+        #: Return vectors of this width instead, to exercise the check.
+        self.wrong_dimensions: int | None = None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def _vector(self, text: str) -> list[float]:
+        width = self.wrong_dimensions or self._dimensions
+        seed = sum(ord(character) for character in text)
+        return [float((seed + position) % 97) / 97.0 for position in range(width)]
+
+    async def embed_text(self, text: str) -> list[float]:
+        vectors = await self.embed_texts([text])
+        return vectors[0]
+
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        if self.fail:
+            raise EmbeddingError(self._model, "provider unreachable")
+
+        self.calls.append(list(texts))
+        validate_input(texts)
+
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = list(texts[start : start + self.batch_size])
+            self.batches.append(batch)
+            vectors.extend(self._vector(text) for text in batch)
+
+        validate_dimensions(vectors, self._dimensions, model=self._model)
+        return vectors
+
+
+class FakeChunkGraph:
+    """In-memory :class:`ChunkGraph` that records what was written.
+
+    Reproduces the replace semantics the real MERGE-and-delete pair gets from
+    Neo4j, so the idempotency tests are asserting the behaviour the graph
+    would actually show rather than a fake that always says yes.
+    """
+
+    def __init__(self) -> None:
+        #: Node property maps per document, keyed by chunk id, as they would
+        #: be written.
+        self.chunks: dict[UUID, dict[str, dict[str, object]]] = {}
+        self.documents: dict[UUID, dict[str, object]] = {}
+        self.schema_dimensions: int | None = None
+        self.index_calls = 0
+        self.fail = False
+
+    async def apply_schema(self, dimensions: int) -> None:
+        self.schema_dimensions = dimensions
+
+    async def index_document(
+        self,
+        *,
+        workspace_id: UUID,
+        document_id: UUID,
+        filename: str,
+        mime_type: str,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+        embedding_model: str,
+    ) -> int:
+        if self.fail:
+            raise GraphError("index", "unreachable")
+        if len(chunks) != len(embeddings):
+            raise GraphError("index", "chunk and embedding counts differ")
+
+        self.index_calls += 1
+        self.documents[document_id] = {
+            "id": str(document_id),
+            "workspace_id": str(workspace_id),
+            "filename": filename,
+            "mime_type": mime_type,
+        }
+        # A replace: chunks the run did not produce are gone, exactly as the
+        # DETACH DELETE of stale nodes would leave them.
+        self.chunks[document_id] = {
+            str(chunk.chunk_id): {
+                **build_chunk_payload(chunk, embedding),
+                "workspace_id": str(workspace_id),
+                "document_id": str(document_id),
+                "embedding_model": embedding_model,
+            }
+            for chunk, embedding in zip(chunks, embeddings, strict=True)
+        }
+        return len(chunks)
+
+    async def delete_document(self, workspace_id: UUID, document_id: UUID) -> None:
+        self.chunks.pop(document_id, None)
+        self.documents.pop(document_id, None)
+
+    async def count_chunks(self, workspace_id: UUID, document_id: UUID) -> int:
+        return len(self.chunks.get(document_id, {}))
+
+
+@pytest.fixture
+def embedding_provider() -> FakeEmbeddingProvider:
+    return FakeEmbeddingProvider()
+
+
+@pytest.fixture
+def chunk_graph() -> FakeChunkGraph:
+    return FakeChunkGraph()
+
+
+_embeddings: EmbeddingProvider = FakeEmbeddingProvider()
+_graph: ChunkGraph = FakeChunkGraph()

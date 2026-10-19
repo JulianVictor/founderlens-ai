@@ -141,6 +141,20 @@ def enum_values(all_sql: str, type_name: str) -> set[str]:
             cleaned = part.strip().strip("'")
             if cleaned:
                 values.add(cleaned)
+
+    # Values added by a later migration are part of the type too. Reading only
+    # the CREATE would report a type that no longer exists.
+    added = f"alter type public.{type_name} add value"
+    for line in all_sql.splitlines():
+        stripped = line.split("--")[0].strip()
+        if stripped.startswith(added):
+            quoted = [part for part in stripped.split("'") if part.strip()]
+            # "... add value if not exists 'embed' after 'persist'" -> the
+            # value is the first quoted token; the rest positions it.
+            for part in quoted:
+                if part.strip() and " " not in part.strip():
+                    values.add(part.strip())
+                    break
     return values
 
 
@@ -181,12 +195,20 @@ def test_document_status_enum_matches_the_application(all_sql: str) -> None:
     assert enum_values(all_sql, "document_status") == {status.value for status in DocumentStatus}
 
 
-def test_embed_and_graph_are_not_yet_stages(all_sql: str) -> None:
+def test_new_stages_are_positioned_in_execution_order(all_sql: str) -> None:
+    """IngestionStage.order depends on declaration order, so a value appended
+    rather than positioned would make the database and the application
+    disagree about what "further along" means."""
+    assert "add value if not exists 'embed' after 'persist'" in all_sql
+    assert "add value if not exists 'index' after 'embed'" in all_sql
+
+
+def test_entity_stages_do_not_exist_yet(all_sql: str) -> None:
     """A stage the pipeline cannot reach would make current_stage a claim
     rather than a fact."""
     stages = enum_values(all_sql, "ingestion_stage")
 
-    assert "embed" not in stages
+    assert "resolve" not in stages
     assert "graph" not in stages
 
 

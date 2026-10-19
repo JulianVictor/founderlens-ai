@@ -93,11 +93,13 @@ api/           HTTP transport. Thin handlers, no domain logic.
 services/      Orchestration: use cases, transaction boundaries.
   |
   v
-repositories/  All I/O against Postgres, Storage and Neo4j.
+repositories/  I/O against Postgres and Storage.
 models/        Persistence shapes (rows, nodes, relationships).
 schemas/       Pydantic contracts crossing the API boundary.
 core/          Config, logging, shared primitives.
-ai/            The research pipeline (see below).
+ai/            The research pipeline, including all Neo4j access: the
+               Cypher templates live in ai/graph/ because they are a
+               pipeline concern, not generic data access.
 ```
 
 A route handler resolves its dependencies, calls one service and serialises the

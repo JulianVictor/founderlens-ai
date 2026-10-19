@@ -9,18 +9,18 @@ result when the corpus does not support an answer.
 The point of the system is that every claim is checkable: retrieval traces,
 supporting chunks, graph paths and evaluation results are all inspectable.
 
-> **Status: Phase 2.** Authentication, workspaces, document management and
+> **Status: Phase 3.** Authentication, workspaces, document management and
 > deterministic ingestion:
 > Supabase Auth with SSR sessions, `profiles` / `workspaces` /
 > `workspace_members` / `documents` behind row-level security, a reusable
 > FastAPI auth dependency, upload/listing/deletion of PDF, plain-text and
 > Markdown documents with server-side content-type detection, and
 > offset-preserving parsing, cleaning and chunking of those documents behind an
-> explicit `UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST` pipeline with job
-> tracking and idempotent reprocessing. **Embeddings, entity extraction and
-> retrieval are not implemented yet** -- `ready` currently means deterministic
-> parsing completed, and chunks are stored in Postgres but not vectorised or
-> added to the graph.
+> explicit `UPLOAD -> EXTRACT -> CLEAN -> CHUNK -> PERSIST -> EMBED -> INDEX`
+> pipeline with job tracking and idempotent reprocessing. Chunks are embedded
+> and written to Neo4j as `:Document`/`:Chunk` nodes behind a cosine vector
+> index. **Retrieval, entity extraction and question answering are not
+> implemented yet** -- documents become searchable, but nothing searches them.
 
 ## Architecture
 
@@ -121,6 +121,11 @@ Neo4j:
 cp infra/docker/.env.example infra/docker/.env      # set NEO4J_PASSWORD
 docker compose -f infra/docker/docker-compose.yml up -d
 ```
+
+Processing a document now needs Neo4j **and** an embedding credential. The API
+verifies the graph at startup and refuses to boot without it, and
+`EMBEDDING_API_KEY` must be set or ingestion fails at the embed stage. Graph
+reachability is reported at `GET /health/graph`.
 
 Full details in [`docs/development.md`](docs/development.md).
 

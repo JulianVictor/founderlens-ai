@@ -203,7 +203,7 @@ class TestProcessingStatusEndpoint:
 
         assert body["status"] == "ready"
         assert body["job"]["status"] == "succeeded"
-        assert body["job"]["current_stage"] == "persist"
+        assert body["job"]["current_stage"] == "index"
         assert body["chunk_count"] > 0
         assert body["job"]["chunk_count"] == body["chunk_count"]
 

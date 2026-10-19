@@ -11,12 +11,14 @@ from uuid import UUID
 class IngestionStage(StrEnum):
     """A stage of the deterministic pipeline.
 
-    Mirrors ``public.ingestion_stage``. Declaration order is execution order,
-    and :attr:`order` depends on it, so stages must be added in the position
-    they actually run rather than appended.
+        Mirrors ``public.ingestion_stage``. Declaration order is execution order,
+        and :attr:`order` depends on it, so stages must be added in the position
+        they actually run rather than appended.
 
-    ``EMBED`` and ``GRAPH`` are deliberately absent: a stage the pipeline
-    cannot reach would make ``current_stage`` a claim rather than a fact.
+    ``PERSIST`` stages chunks in Postgres; ``EMBED`` vectorises them; ``INDEX``
+        writes nodes and vectors into Neo4j. Entity extraction and graph
+        construction are later still and have no stage yet -- one the pipeline
+        cannot reach would make ``current_stage`` a claim rather than a fact.
     """
 
     UPLOAD = "upload"
@@ -24,6 +26,8 @@ class IngestionStage(StrEnum):
     CLEAN = "clean"
     CHUNK = "chunk"
     PERSIST = "persist"
+    EMBED = "embed"
+    INDEX = "index"
 
     @property
     def order(self) -> int:

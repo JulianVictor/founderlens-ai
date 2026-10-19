@@ -22,6 +22,8 @@ import httpx
 from fastapi import Depends, Path, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.ai.embeddings import EmbeddingProvider, build_embedding_provider
+from app.ai.graph import ChunkGraph, Neo4jChunkGraph
 from app.ai.ingestion import (
     ChunkerConfig,
     ParserRegistry,
@@ -34,6 +36,7 @@ from app.core.background import TaskRunner
 from app.core.config import Settings, get_settings
 from app.core.db import Database
 from app.core.exceptions import AuthenticationError
+from app.core.neo4j import Neo4jDatabase
 from app.core.security import AuthenticatedUser, SupabaseJWTVerifier
 from app.models.workspace import WorkspaceMembership, WorkspaceRole
 from app.repositories.chunk_repository import ChunkRepository, PostgresChunkRepository
@@ -287,6 +290,8 @@ def get_ingestion_service(
     cleaner: Annotated[TextCleaner, Depends(get_text_cleaner)],
     tokenizer: Annotated[Tokenizer, Depends(get_ingestion_tokenizer)],
     chunker_config: Annotated[ChunkerConfig, Depends(get_chunker_config)],
+    embeddings: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    graph: Annotated[ChunkGraph, Depends(get_chunk_graph)],
     runner: Annotated[TaskRunner, Depends(get_task_runner)],
 ) -> IngestionService:
     return IngestionService(
@@ -298,8 +303,34 @@ def get_ingestion_service(
         cleaner=cleaner,
         tokenizer=tokenizer,
         chunker_config=chunker_config,
+        embeddings=embeddings,
+        graph=graph,
         runner=runner,
     )
 
 
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
+
+
+def get_graph_database(request: Request) -> Neo4jDatabase:
+    """The Neo4j driver owned by the running application."""
+    database: Neo4jDatabase = request.app.state.graph_database
+    return database
+
+
+GraphDatabaseDep = Annotated[Neo4jDatabase, Depends(get_graph_database)]
+
+
+def get_chunk_graph(database: GraphDatabaseDep) -> ChunkGraph:
+    return Neo4jChunkGraph(database)
+
+
+def get_embedding_provider(settings: SettingsDep, client: HttpClientDep) -> EmbeddingProvider:
+    """The provider named by configuration.
+
+    Built per request rather than cached, because it closes over the shared
+    HTTP client and holds no state of its own. Construction validates that a
+    credential is configured, so a missing key surfaces as an error here
+    rather than as a failed document later.
+    """
+    return build_embedding_provider(settings, client)
