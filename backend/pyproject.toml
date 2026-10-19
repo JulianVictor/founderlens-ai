@@ -15,6 +15,11 @@ dependencies = [
     # Required by FastAPI to parse multipart bodies, which is how documents
     # are uploaded.
     "python-multipart>=0.0.9",
+    # PDF text extraction.
+    "pymupdf>=1.24",
+    # Token counting for chunk sizing. Optional at runtime: ingestion falls
+    # back to an approximate counter when the encoding cannot be loaded.
+    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -92,6 +97,12 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 module = ["asyncpg.*", "pglast.*"]
 ignore_missing_imports = true
+
+# PyMuPDF ships a py.typed marker but annotates only part of its surface, so
+# calls into it read as untyped. Scoped to the one module that touches it.
+[[tool.mypy.overrides]]
+module = ["app.ai.ingestion.pdf_parser", "tests.fixtures.generate_pdfs"]
+disallow_untyped_calls = false
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

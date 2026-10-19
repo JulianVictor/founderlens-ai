@@ -1,0 +1,12 @@
+Acme Robotics — Research Notes
+
+Acme Robotics builds warehouse automation hardware for mid-market logistics
+operators. The company was founded in 2021 by Ada Okonkwo and Grace Lin, both
+previously at a larger robotics firm.
+
+The Series A closed in March 2026 at $12M, led by Initech Ventures. Existing
+seed investors participated. The round values the company at roughly $70M
+post-money, according to two people familiar with the terms.
+
+Competition comes mainly from incumbents selling fixed conveyor systems, whose
+installations take months rather than days. Acme's pitch is time-to-value.

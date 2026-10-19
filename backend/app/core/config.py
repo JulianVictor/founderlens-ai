@@ -78,6 +78,17 @@ class Settings(BaseSettings):
     max_document_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
     storage_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # --- Ingestion ------------------------------------------------------
+    # Target chunk size and overlap, in tokens. Chunks are the unit of
+    # retrieval, embedding and citation at once, so these are the most
+    # consequential retrieval parameters in the system -- they are
+    # configuration rather than constants so they can be tuned against the
+    # evaluation set.
+    chunk_size_tokens: int = Field(default=800, gt=0)
+    chunk_overlap_tokens: int = Field(default=120, ge=0)
+    # Tokenizer encoding used to size chunks. Should match the embedding model.
+    tokenizer_encoding: str = "cl100k_base"
+
     # --- Neo4j ----------------------------------------------------------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"

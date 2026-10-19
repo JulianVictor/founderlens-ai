@@ -137,3 +137,19 @@ class DocumentStorageError(FounderLensError):
     def __init__(self, operation: str) -> None:
         super().__init__(f"Document storage {operation} failed")
         self.operation = operation
+
+
+class DocumentParseError(FounderLensError):
+    """A document could not be turned into text.
+
+    Distinct from :class:`UnsupportedDocumentTypeError`: the type was accepted,
+    and the file still could not be read -- a corrupt PDF, an encrypted one, or
+    bytes that are not valid UTF-8 past the prefix the upload check sampled.
+    Raised during ingestion rather than upload, so it becomes a failed document
+    with an explanation rather than a rejected request.
+    """
+
+    def __init__(self, document_id: UUID, reason: str) -> None:
+        super().__init__(f"Could not parse document {document_id}: {reason}")
+        self.document_id = document_id
+        self.reason = reason

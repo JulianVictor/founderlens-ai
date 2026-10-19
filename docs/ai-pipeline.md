@@ -84,42 +84,112 @@ the extension only chooses between the two text labels once that has passed.
 
 MVP accepts PDF, plain text and Markdown, up to 25 MiB.
 
-### `ingestion/` — text extraction
+### `ingestion/` — text extraction  *(implemented)*
 
 **Responsibility.** Turn uploaded bytes into text, preserving enough structure
 to locate any character later.
 
-Handles the format-specific work (PDF, DOCX, HTML, plain text) and emits text
-plus an offset map — page and section boundaries expressed as character ranges.
-That offset map is the foundation of every citation: a claim is ultimately a
-character span in a document, and a span is only meaningful if the text it
-indexes is stable. Extraction output is therefore persisted, not recomputed.
+A parser per format, selected by the recorded `mime_type` and never by a
+filename, behind the `DocumentParser` protocol:
+
+| Parser | Format | Notes |
+| --- | --- | --- |
+| `PDFParser` | `application/pdf` | PyMuPDF. Emits one `ExtractedPage` per page with its span, so page numbers survive. |
+| `TextParser` | `text/plain` | Strict UTF-8 decode. |
+| `MarkdownParser` | `text/markdown` | Keeps the markup; lifts YAML front matter into metadata. |
+
+`ExtractedDocument.text` is the canonical text that source offsets index. For
+a paginated format it is the pages joined by a single declared separator and
+nothing else, so every page's recorded span indexes it exactly.
+
+Three decisions worth stating:
+
+- **Markdown keeps its markup.** Headings and list markers are the structure
+  the chunker splits on, and they read correctly in a displayed citation. A
+  de-marked-up approximation would chunk worse and cite worse.
+- **No layout reconstruction.** No column detection or table rebuilding: those
+  are heuristics that can be wrong, and a wrong reconstruction is harder to
+  notice downstream than awkward reading order.
+- **Decoding is strict.** The upload check sampled only the first 8 KB, so a
+  file can arrive here and still be undecodable. Replacing bad bytes with
+  U+FFFD would silently corrupt text a citation later quotes, so the document
+  fails instead.
+
+A PDF with no text layer — a scan — is reported as such rather than as an
+empty document, because the fix (OCR) is different from the fix for a bad file.
 
 **Does not:** interpret meaning, summarise, or call an LLM.
 
-### `ingestion/` — cleaning
+### `ingestion/` — cleaning  *(implemented)*
 
 **Responsibility.** Normalise text without destroying offsets.
 
-Whitespace and encoding normalisation, de-hyphenation across line breaks,
-removal of repeated headers, footers and page furniture. Every edit is recorded
-as a transformation against the original offsets, so a span in cleaned text
-still resolves to a span in the source file. Cleaning that silently reindexes
-text breaks citations in a way that is very hard to notice.
+`TextCleaner` normalises line endings, removes zero-width characters and soft
+hyphens, rejoins words broken across a line, collapses repeated spacing inside
+a line, strips trailing whitespace, reduces runs of blank lines to one, and
+trims the document.
+
+The constraint that shapes it: cleaning is restricted to **deletions and
+equal-length substitutions**. Neither can shift text by an amount a map cannot
+account for, so the `OffsetMap` it returns is exact rather than approximate,
+and every cleaned offset resolves to a real source offset. An approximate map
+would be worse than none — a citation highlighting the wrong sentence is harder
+to notice than one that admits it does not know. Transformations that cannot be
+expressed that way, such as Unicode NFC normalisation, are out of scope by
+construction rather than by discipline.
+
+Leading indentation is preserved, because Markdown nesting and code blocks
+depend on it.
+
+**Not done yet:** repeated headers and footers are left in place. Detecting
+them means deciding that a line appearing on most pages is furniture rather
+than content, and that judgement is wrong often enough — a recurring section
+title, a company name that is also the subject — that deleting the text would
+lose evidence. It needs cross-page frequency analysis and a recorded decision,
+and belongs in a later phase.
 
 **Does not:** paraphrase or rewrite. Cleaning is lossless with respect to
 meaning.
 
-### `ingestion/` — chunking
+### `ingestion/` — chunking  *(implemented)*
 
 **Responsibility.** Split cleaned text into units that are good to retrieve and
 good to cite.
 
-Chunks respect structure (section and paragraph boundaries) before length, carry
-a bounded overlap so a fact spanning a boundary is not lost, and record
-`document_id`, `ordinal` and `char_start`/`char_end`. The chunk is the unit of
-retrieval, the unit of embedding and the unit of citation simultaneously, which
-is why its boundaries matter more than any other single ingestion parameter.
+Defaults: **800 tokens, 120 tokens of overlap**, both configurable.
+
+**Why the text is split on structure rather than on tokens.** The obvious
+implementation encodes the document, slices the token array into windows and
+decodes each one. It is wrong for this system: a decoded token slice has no
+relationship to the original character positions, and a chunk whose offsets are
+unknown cannot be cited. So the text is divided at boundaries that exist in it
+— paragraphs, then sentences, then words, with a character split only for a
+pathological run such as a base64 blob — and the tokenizer decides only how
+many pieces fit. Offsets survive exactly, and chunks additionally respect the
+document's own structure.
+
+Each chunk records `chunk_id`, `document_id`, `workspace_id`, `text`,
+`chunk_index`, `page_number` and every page it covers, `token_count`, its span
+in the cleaned text, its span in the source text, and a `content_hash`.
+
+- **`cleaned.text[start_offset:end_offset] == text`** is an exact invariant, so
+  a chunk is verifiable against the document it was cut from.
+- **Chunk ids are deterministic**: `uuid5` over document, index and content
+  hash. Re-ingesting an unchanged document produces the same ids, so graph
+  provenance does not churn; changed text produces a new id, because it is a
+  different chunk and should not inherit the claims that cited the old one.
+- **`content_hash` detects duplicate content** — boilerplate repeated across a
+  corpus — without comparing text.
+- **Overlap is a budget, not a promise.** It repeats whole paragraphs or
+  sentences, since a piece is the smallest unit whose offsets are known. Where
+  every trailing piece is larger than the budget, chunks come out disjoint.
+
+Token counts come from a `Tokenizer` behind an interface: `tiktoken` where its
+encoding table is reachable, and a logged fall back to an offline approximation
+where it is not — ingestion should degrade to slightly imprecise chunk sizes
+rather than stop. Counts are not additive under byte-pair encoding, so packing
+uses the sum of the pieces as its budget and the count recorded on a finished
+chunk is a fresh count of the text actually emitted.
 
 Per the engineering rules, a whole document is never sent to the LLM where
 chunking is appropriate.

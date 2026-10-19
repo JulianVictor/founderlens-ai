@@ -9,13 +9,15 @@ result when the corpus does not support an answer.
 The point of the system is that every claim is checkable: retrieval traces,
 supporting chunks, graph paths and evaluation results are all inspectable.
 
-> **Status: Phase 1.** Authentication, workspaces and document management:
+> **Status: Phase 2.** Authentication, workspaces, document management and
+> deterministic ingestion:
 > Supabase Auth with SSR sessions, `profiles` / `workspaces` /
 > `workspace_members` / `documents` behind row-level security, a reusable
-> FastAPI auth dependency, and upload, listing and deletion of PDF, plain-text
-> and Markdown documents with server-side content-type detection. **Ingestion
-> and the research pipeline are not implemented yet** -- uploaded documents are
-> stored, not yet chunked, embedded or added to the graph.
+> FastAPI auth dependency, upload/listing/deletion of PDF, plain-text and
+> Markdown documents with server-side content-type detection, and
+> offset-preserving parsing, cleaning and chunking of those documents. **Embeddings,
+> entity extraction and retrieval are not implemented yet** -- chunks are
+> produced but not yet vectorised or added to the graph.
 
 ## Architecture
 
